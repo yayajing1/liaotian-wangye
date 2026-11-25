@@ -897,8 +897,10 @@ server.listen(PORT, HOST, () => {
   console.log(`数据文件: ${path.join(DATA_DIR, 'chat.db')}`);
   console.log(`消息保留 ${RETENTION_MS / 86400000} 天,撤回时限 ${RECALL_WINDOW_MS / 60000} 分钟`);
   if (ROOM_KEY) {
-    console.log(`房间口令: ${ROOM_KEY}   （加到链接后面就能进来：…/chat#key=${ROOM_KEY}）`);
-    if (ROOM_KEY_SPARE) console.log(`备用口令: ${ROOM_KEY_SPARE}   （主口令那一版失效时的备选）`);
+    // ⚠️ 不要把口令原文打进日志：journal 会被日志轮转、备份、导出。
+    //    要拿真值用 `cat data/room.key` 或 `bash deploy/print-link.sh`。
+    console.log(`房间口令: 已设置（${ROOM_KEY.length} 位）— 用 deploy/print-link.sh 生成可分享链接`);
+    if (ROOM_KEY_SPARE) console.log(`备用口令: 已设置（${ROOM_KEY_SPARE.length} 位，主口令失效时仍可进）`);
   } else {
     console.log('房间口令: 未设置（公开房间，谁都能进）');
   }
