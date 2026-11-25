@@ -84,6 +84,20 @@ tar -czf "$OUT" -C "$(dirname "$DB")" "$(basename "$DB")" \
   -C "$DATA_DIR" room.key 2>/dev/null \
   || tar -czf "$OUT" -C "$DATA_DIR" chat.db room.key
 
+# 包内统一用 chat.db 这个名字 —— 快照文件叫 chat.db.snap，
+# 直接打进去的话迁移解开会得到 chat.db.snap，解压脚本找不到 chat.db。
+if [ "$DB" != "$DATA_DIR/chat.db" ]; then
+  TMPD="$BACKUP_DIR/.pkgtmp-$$"
+  rm -rf "$TMPD"; mkdir -p "$TMPD"
+  tar -xzf "$OUT" -C "$TMPD" 2>/dev/null || true
+  if [ -f "$TMPD/$(basename "$DB")" ]; then
+    mv "$TMPD/$(basename "$DB")" "$TMPD/chat.db"
+  fi
+  rm -f "$OUT"
+  tar -czf "$OUT" -C "$TMPD" . 2>/dev/null || true
+  rm -rf "$TMPD"
+fi
+
 [ -f "$SNAP" ] && rm -f "$SNAP"
 
 echo ""
