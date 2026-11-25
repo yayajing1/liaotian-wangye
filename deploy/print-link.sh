@@ -22,11 +22,20 @@ GITHUB_URL="${GITHUB_URL:-https://github.com/yayajing1/liaotian-wangye}"
 
 # 从服务器读真实口令（去掉换行）
 # 本机在服务器上就直接读文件；否则 SSH 过去读。
+read_spare() {
+  systemctl show -p Environment --value chat-room 2>/dev/null \
+    | tr ' ' '\n' | sed -n 's/^ROOM_KEY_SPARE=//p' | head -1
+}
+
 if [ -r "$APP_DIR/data/room.key" ]; then
   KEY=$(tr -d '\r\n' < "$APP_DIR/data/room.key")
+  SPARE_KEY=$(read_spare)
 else
   KEY=$(ssh -o ConnectTimeout=20 -o BatchMode=yes "$SERVER" \
     "cat $APP_DIR/data/room.key 2>/dev/null" | tr -d '\r\n')
+  SPARE_KEY=$(ssh -o ConnectTimeout=20 -o BatchMode=yes "$SERVER" \
+    "systemctl show -p Environment --value chat-room 2>/dev/null \
+     | tr ' ' '\n' | sed -n 's/^ROOM_KEY_SPARE=//p' | head -1" | tr -d '\r\n')
 fi
 
 if [ -z "$KEY" ]; then
@@ -37,13 +46,10 @@ fi
 
 LINK="$BASE_URL#key=$KEY"
 
-# 备用口令（如果服务端配了 ROOM_KEY_SPARE）—— 主口令那版失效时的备选链接
+# 备用口令（服务端配了 ROOM_KEY_SPARE 时）—— 主口令那版失效时的备选链接
 SPARE=""
-if [ -n "${ROOM_KEY_SPARE:-}" ]; then
-  SPARE="$BASE_URL#key=$ROOM_KEY_SPARE"
-elif [ -r "$APP_DIR/data/room.key.spare" ]; then
-  SPARE_KEY=$(tr -d '\r\n' < "$APP_DIR/data/room.key.spare")
-  [ -n "$SPARE_KEY" ] && SPARE="$BASE_URL#key=$SPARE_KEY"
+if [ -n "${SPARE_KEY:-}" ]; then
+  SPARE="$BASE_URL#key=$SPARE_KEY"
 fi
 
 cat <<EOF
