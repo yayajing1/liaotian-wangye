@@ -633,6 +633,11 @@ wss.on('connection', (ws, req) => {
     roomKey = String(new URL(req.url, 'http://localhost').searchParams.get('key') || '');
   } catch { roomKey = ''; }
 
+  if (process.env.WS_DEBUG) {
+    const ua = String(req.headers['user-agent'] || '').slice(0, 40);
+    console.log(`[ws] url=${req.url} key=${JSON.stringify(roomKey)} len=${roomKey.length} match=${keyMatches(roomKey)} ua=${ua}`);
+  }
+
   if (!keyMatches(roomKey)) {
     send(ws, { t: 'error', code: 'bad_key', msg: '房间口令不正确' });
     try { ws.close(4001, 'bad key'); } catch { /* ignore */ }
