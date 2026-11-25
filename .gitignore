@@ -33,6 +33,7 @@ share-link.txt
 # 隧道日志
 *.log
 tunnel.log
+launch.out
 
 # 部署包（可由 deploy/pack.sh 重新生成）
 deploy/chat-room.tar.gz

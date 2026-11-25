@@ -25,6 +25,7 @@ SELF_URL=""
 GIT_REPO=""
 WITH_HTTPS=0
 APP_DIR_EXPLICIT=0
+DOMAIN=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,8 +35,12 @@ while [ $# -gt 0 ]; do
     --self) SELF_URL="$2"; shift 2 ;;
     --git)  GIT_REPO="$2"; shift 2 ;;
     --https) WITH_HTTPS=1; shift ;;
+    --domain) DOMAIN="$2"; shift 2 ;;
     -h|--help)
-      echo "用法: bash deploy.sh [--port 端口] [--dir 安装目录] [--url 代码包下载地址] [--self 本脚本下载地址] [--git GitHub仓库地址] [--https 顺便配HTTPS]"
+      echo "用法: bash deploy.sh [--port 端口] [--dir 安装目录] [--url 代码包下载地址] [--self 本脚本下载地址] [--git GitHub仓库地址] [--https 顺便配HTTPS] [--domain 自定义域名]"
+      echo ""
+      echo "  --domain chat.example.com   配 HTTPS 时签域名证书（90天）"
+      echo "  不带 --domain                签 IP 证书（6天）"
       exit 0 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
@@ -605,8 +610,13 @@ if [ "$WITH_HTTPS" -eq 1 ]; then
   HTTPS_SH="$APP_DIR/deploy/https-setup.sh"
   if [ -f "$HTTPS_SH" ]; then
     # 装依赖那步可能因为 --omit=dev 跳过了 devDeps，但这个脚本是纯 bash，无依赖
-    bash "$HTTPS_SH" --ip "$PUB_IP" --port "$PORT" --dir "$APP_DIR" || \
-      say "${C_Y}[提示] HTTPS 环节未完全成功，可稍后单独跑：bash deploy/https-setup.sh${C_0}"
+    if [ -n "$DOMAIN" ]; then
+      bash "$HTTPS_SH" --ip "$PUB_IP" --port "$PORT" --dir "$APP_DIR" --domain "$DOMAIN" || \
+        say "${C_Y}[提示] HTTPS 环节未完全成功，可稍后单独跑：bash deploy/https-setup.sh --domain $DOMAIN${C_0}"
+    else
+      bash "$HTTPS_SH" --ip "$PUB_IP" --port "$PORT" --dir "$APP_DIR" || \
+        say "${C_Y}[提示] HTTPS 环节未完全成功，可稍后单独跑：bash deploy/https-setup.sh${C_0}"
+    fi
   else
     say "${C_Y}[提示] 没找到 $HTTPS_SH${C_0}"
   fi

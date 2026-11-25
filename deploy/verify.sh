@@ -19,14 +19,16 @@ APP_DIR="/opt/chat-room"
 NODE_PORT="8000"
 PUB_IP=""
 APP_DIR_EXPLICIT=0
+DOMAIN=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --ip)   PUB_IP="$2"; shift 2 ;;
     --port) NODE_PORT="$2"; shift 2 ;;
     --dir)  APP_DIR="$2"; APP_DIR_EXPLICIT=1; shift 2 ;;
+    --domain) DOMAIN="$2"; shift 2 ;;
     -h|--help)
-      echo "用法: bash verify.sh [--ip 公网IP] [--port Node端口] [--dir 安装目录]"
+      echo "用法: bash verify.sh [--ip 公网IP] [--port Node端口] [--dir 安装目录] [--domain 自定义域名]"
       exit 0 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
@@ -147,9 +149,16 @@ if [ -s "$SSL_DIR/fullchain.pem" ] && [ -s "$SSL_DIR/privkey.pem" ]; then
   if [ -n "$CERT_DAYS" ]; then
     info "有效期至：$CERT_DAYS"
   fi
-  # SAN —— 应该显示 IP 地址
+  # SAN —— 域名模式下应该显示域名，IP 模式下应该显示 IP 地址
   SAN=$(openssl x509 -noout -text -in "$SSL_DIR/fullchain.pem" 2>/dev/null | grep -A1 "Subject Alternative Name" | tail -1 | tr -d ' ')
-  if echo "$SAN" | grep -q "IP Address"; then
+  if [ -n "$DOMAIN" ]; then
+    if echo "$SAN" | grep -qF "$DOMAIN"; then
+      ok "证书签发对象是域名 ${DOMAIN}：$SAN"
+    else
+      bad "证书里没有 ${DOMAIN}：$SAN —— 跑 https-setup.sh --domain ${DOMAIN} 重签"
+      FAIL=1
+    fi
+  elif echo "$SAN" | grep -q "IP Address"; then
     ok "证书签发对象是 IP：$SAN"
   else
     warn "证书 SAN 不是 IP 地址：$SAN"
@@ -242,12 +251,30 @@ if [ -z "$PUB_IP" ]; then
 else
   info "公网 IP：${PUB_IP}"
 
-  CODE=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 10 "https://${PUB_IP}/chat" 2>/dev/null); CODE="${CODE:-000}"
+  # 有域名时，域名才是真正的访问入口，优先测域名
+  HTTPS_HOST="${DOMAIN:-$PUB_IP}"
+  if [ -n "$DOMAIN" ]; then
+    info "域名：${DOMAIN}"
+  fi
+
+  CODE=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 10 "https://${HTTPS_HOST}/chat" 2>/dev/null); CODE="${CODE:-000}"
   if [ "$CODE" = "200" ]; then
     ok "公网 HTTPS 通（${CODE}）✓"
   else
     bad "公网 HTTPS 不通（${CODE}）—— 检查云防火墙 443 规则"
     FAIL=1
+  fi
+
+  # 域名模式下，证书必须签给域名（IP 证书在域名访问时会报错）
+  if [ -n "$DOMAIN" ] && [ -s "$SSL_DIR/fullchain.pem" ]; then
+    SUBJ=$(openssl x509 -in "$SSL_DIR/fullchain.pem" -noout -text 2>/dev/null \
+      | grep -A1 "Subject Alternative Name" | tail -1 | tr -d ' ' || true)
+    if echo "$SUBJ" | grep -qF "$DOMAIN"; then
+      ok "证书包含域名 ${DOMAIN} ✓"
+    else
+      bad "证书里没有 ${DOMAIN}（SAN: ${SUBJ:-未知}）—— 用了 IP 证书，域名访问会报证书错误"
+      FAIL=1
+    fi
   fi
 
   CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "http://${PUB_IP}:${NODE_PORT}/chat" 2>/dev/null); CODE="${CODE:-000}"
@@ -272,7 +299,11 @@ say "${C_C}============================================${C_0}"
 if [ "$FAIL" -eq 0 ]; then
   say "${C_G}  全部通过 ✓${C_0}"
   say ""
-  say "  ${C_C}最终访问地址${C_0} : https://${PUB_IP:-<你的IP>}/chat#key=<口令>"
+  if [ -n "$DOMAIN" ]; then
+    say "  ${C_C}最终访问地址${C_0} : https://${DOMAIN}/chat#key=<口令>"
+  else
+    say "  ${C_C}最终访问地址${C_0} : https://${PUB_IP:-<你的IP>}/chat#key=<口令>"
+  fi
 else
   say "${C_Y}  有项目没通过（见上面标 ✗ 的）${C_0}"
   say "  ${C_D}常见解法：bash deploy/https-setup.sh（可重复执行）${C_0}"
