@@ -136,6 +136,10 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 # acme.sh —— 纯 shell，不依赖 Python
+# ⚠️ 重要：get.acme.sh 的第一个位置参数被当作「邮箱」，
+#    传 `--home xxx` 会被当成邮箱值，最终报 "Unknown parameter: ----home"。
+#    正确做法：直接不带参数安装，默认落到 $HOME/.acme.sh。
+#    以 root 运行时 $HOME=/root，正是我们要的位置。
 if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
   say "      下载 acme.sh ..."
   if command -v curl >/dev/null 2>&1; then
@@ -144,8 +148,27 @@ if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
       || true
   fi
   if [ -s /tmp/acme-install.sh ]; then
-    sh /tmp/acme-install.sh --home "$HOME/.acme.sh" >/dev/null 2>&1 || true
+    # 不传 --home —— get.acme.sh 会把首个参数当邮箱
+    sh /tmp/acme-install.sh >/dev/null 2>&1 || true
     rm -f /tmp/acme-install.sh
+  fi
+  # 兜底：直接从 GitHub 归档装
+  if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
+    say "      用 GitHub 归档兜底安装 ..."
+    mkdir -p /tmp/acme-src
+    curl -fsSL --max-time 120 "https://github.com/acmesh-official/acme.sh/archive/master.tar.gz" \
+      -o /tmp/acme.tar.gz 2>/dev/null || true
+    if [ -s /tmp/acme.tar.gz ] && tar -tzf /tmp/acme.tar.gz >/dev/null 2>&1; then
+      tar -xzf /tmp/acme.tar.gz -C /tmp/acme-src --strip-components=1 2>/dev/null || true
+      if [ -f /tmp/acme-src/acme.sh ]; then
+        mkdir -p "$HOME/.acme.sh"
+        cp /tmp/acme-src/acme.sh "$HOME/.acme.sh/acme.sh"
+        chmod +x "$HOME/.acme.sh/acme.sh"
+        mkdir -p "$HOME/.acme.sh/bin"
+        cp /tmp/acme-src/acme.sh "$HOME/.acme.sh/bin/acme.sh" 2>/dev/null || true
+      fi
+    fi
+    rm -rf /tmp/acme-src /tmp/acme.tar.gz
   fi
 fi
 
@@ -153,6 +176,7 @@ if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
   say "${C_Y}      ⚠️ acme.sh 没装上，将只配置 Nginx（不签证书）${C_0}"
   SKIP_CERT=1
 else
+  chmod +x "$HOME/.acme.sh/acme.sh" 2>/dev/null || true
   say "      acme.sh 就绪 ✓"
 fi
 
@@ -336,14 +360,51 @@ else
 
   # 签发目标：域名用 -d 域名，IP 用 -d IP + shortlived
   ISSUE_OK=0
+  CERT_DOMAIN=""
+  CERT_EXPIRED=0
+
   if [ -n "$DOMAIN" ]; then
+    CERT_DOMAIN="$DOMAIN"
+  else
+    CERT_DOMAIN="$PUB_IP"
+  fi
+
+  # ---------- 4.0 先看有没有可用的现成证书 ----------
+  # acme.sh 在证书未到期时会跳过重签并返回非零，若直接跑 --issue 会被误判为"签发失败"。
+  # 所以先查 acme.sh 记录的证书状态：有效就直接安装，不再重签。
+  CERT_LEAF="$HOME/.acme.sh/${CERT_DOMAIN}_ecc/${CERT_DOMAIN}.cer"
+  CERT_INFO=""
+  if [ -f "$CERT_LEAF" ]; then
+    CERT_INFO=$("$ACME" --info -d "$CERT_DOMAIN" --ecc 2>/dev/null || true)
+    NEXT_RENEW=$(echo "$CERT_INFO" | grep -oE 'Le_NextRenewTime=[^ ]*' | cut -d= -f2 || true)
+    NEXT_RENEW_TS=$(echo "$CERT_INFO" | grep -oE 'Le_NextRenewTimeStr=[^ ]*' | cut -d= -f2 || true)
+    if [ -n "$NEXT_RENEW_TS" ]; then
+      RENEW_EPOCH=$(date -d "$NEXT_RENEW_TS" +%s 2>/dev/null || echo 0)
+      NOW_EPOCH=$(date +%s)
+      if [ "$RENEW_EPOCH" -gt 0 ] && [ "$RENOW_EPOCH" -gt "$NOW_EPOCH" ]; then
+        say "      ${C_G}已有有效证书，直接安装（下次续期：${NEXT_RENEW_TS}）${C_0}"
+        ISSUE_OK=1
+      else
+        say "${C_Y}      证书已过期或即将到期，重新签发 ...${C_0}"
+        CERT_EXPIRED=1
+      fi
+    fi
+  fi
+
+  if [ "$ISSUE_OK" -eq 0 ]; then
+    if [ -n "$DOMAIN" ]; then
+      say "[4/6] 签发 Let's Encrypt 域名证书（${DOMAIN}）..."
+    else
+      say "[4/6] 签发 Let's Encrypt IP 证书 ..."
+    fi
+  fi
+
+  if [ "$ISSUE_OK" -eq 0 ] && [ -n "$DOMAIN" ]; then
     # 域名证书：标准配置，有效期 90 天
     # --days 60 = 到期前 60 天开始尝试续期，留足重试余量
-    CERT_DOMAIN="$DOMAIN"
     ISSUE_FLAGS="--days 60"
     # 顺手把 www 也签上（如果 DNS 里有 www 解析）
     if [ "${DOMAIN#www.}" != "$DOMAIN" ]; then
-      CERT_DOMAIN="${DOMAIN#www.}"
       ISSUE_FLAGS="$ISSUE_FLAGS -d www.$CERT_DOMAIN"
     fi
     if "$ACME" --issue --server letsencrypt \
@@ -352,11 +413,9 @@ else
          --keylength ec-256 >/tmp/acme-issue.log 2>&1; then
       ISSUE_OK=1
     fi
-  else
-    CERT_DOMAIN="$PUB_IP"
+  elif [ "$ISSUE_OK" -eq 0 ]; then
     # IP 证书必须用 shortlived 配置（160 小时）
     # --days 3 = 每 3 天检查续期，留出失败重试的余量
-    ISSUE_FLAGS="--certificate-profile shortlived --days 3"
     if "$ACME" --issue --server letsencrypt \
          -d "$PUB_IP" \
          -w "$WEBROOT" \
@@ -582,9 +641,16 @@ fi
 
 CERT_DAYS="未知"
 if [ -s "$SSL_DIR/fullchain.pem" ]; then
-  CERT_DAYS=$("$HOME/.acme.sh/acme.sh" --info -d "$ACCESS_HOST" 2>/dev/null \
-    | grep -oE 'Le_NextRenewTime=.*' | head -1 | cut -d'=' -f2 || echo "未知")
-  [ -z "$CERT_DAYS" ] && CERT_DAYS="已安装"
+  # 证书实际到期时间（openssl 直读文件，最准）+ acme.sh 下次续期时间
+  CERT_EXP=$(openssl x509 -in "$SSL_DIR/fullchain.pem" -noout -enddate 2>/dev/null | sed 's/notAfter=//' || true)
+  NEXT_RENEW_STR=$("$HOME/.acme.sh/acme.sh" --info -d "$ACCESS_HOST" --ecc 2>/dev/null \
+    | grep -oE 'Le_NextRenewTimeStr=[^ ]*' | head -1 | cut -d'=' -f2 || true)
+  if [ -n "$CERT_EXP" ]; then
+    CERT_DAYS="证书 ${CERT_EXP}"
+    [ -n "$NEXT_RENEW_STR" ] && CERT_DAYS="${CERT_DAYS}（下次续期 ${NEXT_RENEW_STR}）"
+  else
+    CERT_DAYS="已安装"
+  fi
 fi
 
 if [ -s "$SSL_DIR/fullchain.pem" ]; then
