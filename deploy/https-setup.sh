@@ -374,14 +374,15 @@ else
   # 所以先查 acme.sh 记录的证书状态：有效就直接安装，不再重签。
   CERT_LEAF="$HOME/.acme.sh/${CERT_DOMAIN}_ecc/${CERT_DOMAIN}.cer"
   CERT_INFO=""
+  NEXT_RENEW_TS=""
+  RENEW_EPOCH=0
   if [ -f "$CERT_LEAF" ]; then
     CERT_INFO=$("$ACME" --info -d "$CERT_DOMAIN" --ecc 2>/dev/null || true)
-    NEXT_RENEW=$(echo "$CERT_INFO" | grep -oE 'Le_NextRenewTime=[^ ]*' | cut -d= -f2 || true)
-    NEXT_RENEW_TS=$(echo "$CERT_INFO" | grep -oE 'Le_NextRenewTimeStr=[^ ]*' | cut -d= -f2 || true)
+    NEXT_RENEW_TS=$(echo "$CERT_INFO" | grep -oE 'Le_NextRenewTimeStr=[^ ]*' | head -1 | cut -d'=' -f2 || true)
     if [ -n "$NEXT_RENEW_TS" ]; then
       RENEW_EPOCH=$(date -d "$NEXT_RENEW_TS" +%s 2>/dev/null || echo 0)
       NOW_EPOCH=$(date +%s)
-      if [ "$RENEW_EPOCH" -gt 0 ] && [ "$RENOW_EPOCH" -gt "$NOW_EPOCH" ]; then
+      if [ "$RENEW_EPOCH" -gt 0 ] && [ "$RENEW_EPOCH" -gt "$NOW_EPOCH" ]; then
         say "      ${C_G}已有有效证书，直接安装（下次续期：${NEXT_RENEW_TS}）${C_0}"
         ISSUE_OK=1
       else
