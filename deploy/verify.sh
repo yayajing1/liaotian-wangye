@@ -209,14 +209,21 @@ const WebSocket = require("ws");
 const w = new WebSocket(url, { rejectUnauthorized: false });
 let done = false;
 const finish = (code) => { if (done) return; done = true; try { w.terminate(); } catch (e) {} process.exit(code); };
-w.on("open", () => { console.log("OPEN_UNEXPECTED"); finish(2); });
+// 注意：服务端的行为是「先完成 WS 升级握手，再发 {t:"error",code:"bad_key"} 并关闭」。
+// 所以 open 事件一定会先到，不能据此判定「连上了」。
+// 真正的判据是后续消息里有没有 bad_key。
+w.on("open", () => { console.log("HANDSHAKE_OK"); });
 w.on("message", (d) => {
   const s = d.toString();
   if (s.indexOf("bad_key") >= 0) { console.log("BAD_KEY_OK"); finish(0); }
+  else if (s.indexOf("\"t\":\"init\"") >= 0 || s.indexOf("\"t\": \"init\"") >= 0) {
+    console.log("INIT_UNEXPECTED"); finish(2);
+  }
   else { console.log("OTHER:" + s.slice(0, 80)); finish(3); }
 });
 w.on("error", (e) => { console.log("ERR:" + (e && e.message)); finish(4); });
-setTimeout(() => { console.log("TIMEOUT"); finish(5); }, 8000);
+w.on("close", () => { if (!done) { console.log("CLOSED_NO_MSG"); finish(5); } });
+setTimeout(() => { if (!done) { console.log("TIMEOUT"); finish(6); } }, 8000);
 '
 
   NODE_BIN="$(command -v node || echo /usr/local/bin/node)"
@@ -230,11 +237,13 @@ setTimeout(() => { console.log("TIMEOUT"); finish(5); }, 8000);
     case "$WS_PROBE" in
       *BAD_KEY_OK*)
         ok "WebSocket 升级正常，且口令门禁生效（bad_key）✓" ;;
-      *OPEN_UNEXPECTED*)
-        warn "WebSocket 不带口令就连上了 —— 检查口令校验"
+      *INIT_UNEXPECTED*)
+        warn "WebSocket 不带口令就收到 init —— 检查口令校验"
         FAIL=1 ;;
       *TIMEOUT*)
         warn "WebSocket 连接超时 —— 检查 Nginx 的 location /ws 配置" ;;
+      *CLOSED_NO_MSG*)
+        warn "WebSocket 连接被关闭但没收到任何消息 —— 检查服务端日志" ;;
       *ERR:*)
         warn "WebSocket 连接失败 —— ${WS_PROBE}" ;;
       *)
