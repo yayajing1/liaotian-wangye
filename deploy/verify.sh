@@ -221,9 +221,12 @@ setTimeout(() => { console.log("TIMEOUT"); finish(5); }, 8000);
 
   NODE_BIN="$(command -v node || echo /usr/local/bin/node)"
   if [ -x "$NODE_BIN" ] && [ -d "$APP_DIR/node_modules/ws" ]; then
-    WS_PROBE=$(cd "$APP_DIR" && WS_TMP="$(mktemp /tmp/wsprobe-XXXXXX.js)" && printf '%s' "$WS_CHECK_SCRIPT" > "$WS_TMP" \
-      && "$NODE_BIN" "$WS_TMP" "wss://127.0.0.1/ws?key=__probe__&cid=verify-probe" 2>&1 \
-      | head -3; rm -f "$WS_TMP" 2>/dev/null || true)
+    # 探测脚本必须放在 $APP_DIR 里 —— Node 按「脚本所在目录」向上找 node_modules，
+    # 放在 /tmp 会找不到 ws 模块。
+    WS_TMP="$APP_DIR/.ws-probe-$$.js"
+    printf '%s' "$WS_CHECK_SCRIPT" > "$WS_TMP"
+    WS_PROBE=$(cd "$APP_DIR" && "$NODE_BIN" "$WS_TMP" "wss://127.0.0.1/ws?key=__probe__&cid=verify-probe" 2>&1 | head -3)
+    rm -f "$WS_TMP" 2>/dev/null || true
     case "$WS_PROBE" in
       *BAD_KEY_OK*)
         ok "WebSocket 升级正常，且口令门禁生效（bad_key）✓" ;;
