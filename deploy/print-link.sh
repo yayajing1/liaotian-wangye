@@ -21,8 +21,13 @@ BASE_URL="${BASE_URL:-https://8.222.185.143/chat}"
 GITHUB_URL="${GITHUB_URL:-https://github.com/yayajing1/liaotian-wangye}"
 
 # 从服务器读真实口令（去掉换行）
-KEY=$(ssh -o ConnectTimeout=20 -o BatchMode=yes "$SERVER" \
-  "cat $APP_DIR/data/room.key 2>/dev/null" | tr -d '\r\n')
+# 本机在服务器上就直接读文件；否则 SSH 过去读。
+if [ -r "$APP_DIR/data/room.key" ]; then
+  KEY=$(tr -d '\r\n' < "$APP_DIR/data/room.key")
+else
+  KEY=$(ssh -o ConnectTimeout=20 -o BatchMode=yes "$SERVER" \
+    "cat $APP_DIR/data/room.key 2>/dev/null" | tr -d '\r\n')
+fi
 
 if [ -z "$KEY" ]; then
   echo "❌ 没读到房间口令（SSH 或路径不对？）" >&2
