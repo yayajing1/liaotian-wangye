@@ -20,6 +20,10 @@
     keyModal: $('keyModal'), keyModalDesc: $('keyModalDesc'), keyInput: $('keyInput'),
     keyLen: $('keyLen'), keyPaste: $('keyPaste'), keyErr: $('keyErr'),
     keyOk: $('keyOk'), keyCancel: $('keyCancel'),
+    avatarModal: $('avatarModal'), colorGrid: $('colorGrid'), avatarCancel: $('avatarCancel'),
+    avatarConfirm: $('avatarConfirm'), avatarPreview: $('avatarPreview'),
+    avatarPreviewName: $('avatarPreviewName'), avatarErr: $('avatarErr'),
+    avatarConfirmOk: $('avatarConfirmOk'), avatarConfirmCancel: $('avatarConfirmCancel'),
   };
 
   const RECALL_WINDOW = 2 * 60 * 1000;    // 撤回时限
@@ -33,6 +37,17 @@
     '👍','👎','👏','🙌','🙏','💪','✌️','🤝',
     '🎉','🔥','✨','💯','❤️','💔','⭐','🌈',
     '🍎','🍉','🍔','🍕','☕','🍺','🎂','🍰',
+  ];
+
+  // 兜底色池：正常情况下服务端会在 init 里下发 state.colors，
+  // 这里只是万一服务端是旧版本时，弹窗里还有个能用的列表。
+  const FALLBACK_COLORS = [
+    '#d4eddc', '#a8dcb9', '#7acd95', '#4abf71',
+    '#f8d3dc', '#ef9fb3', '#e86888', '#e52e5c',
+    '#fdf6dd', '#f7e39a', '#f0cf5c', '#e5b52a',
+    '#e0d7f4', '#baa6e7', '#9374dc', '#6d41d2',
+    '#ffffff', '#ebebeb', '#d4d4d4', '#b8b8b8',
+    '#9a9a9a', '#6e6e6e', '#464646', '#262626',
   ];
 
   const state = {
@@ -52,6 +67,8 @@
     savedKey: '',      // 本机上次验证通过、记住的口令
     triedFallback: false, // 链接口令失败后是否已试过回退
     takeover: false,   // 被别的连接顶替了，等用户点「重新进入」
+    colors: [],        // 可选头像色（服务端下发，客户端只照着渲染）
+    pickedColor: '',   // 在调色板里选中、但还没确认的颜色
   };
 
   /* ---------------- 工具 ---------------- */
@@ -364,6 +381,12 @@
         state.hasMore = !!data.hasMore;
         state.messages = data.history.slice();
         state.byId = new Map(state.messages.map((m) => [m.id, m]));
+        // 头像可选颜色由服务端下发
+        if (Array.isArray(data.colors) && data.colors.length) {
+          state.colors = data.colors;
+        } else if (!state.colors.length) {
+          state.colors = FALLBACK_COLORS;
+        }
         renderMe();
         renderUsers();
         renderMessages({ stickBottom: true });
@@ -407,6 +430,29 @@
         renderMe();
         renderUsers();
         renderMessages();
+        break;
+      }
+
+      case 'avatar': {
+        // 换了头像颜色 —— 成员列表、消息里的头像都要跟着变
+        state.users.set(data.user.id, data.user);
+        if (state.self && data.user.id === state.self.id) state.self = data.user;
+        for (const m of state.messages) {
+          if (m.from.id === data.user.id) m.from.color = data.user.color;
+        }
+        renderMe();
+        renderUsers();
+        renderMessages();
+        break;
+      }
+
+      case 'avatarAck': {
+        // 服务端只把回执发给「改头像的那个人」
+        if (!data.ok) {
+          el.avatarErr.hidden = false;
+          el.avatarErr.textContent = data.msg || '没改成，再试一次。';
+          if (el.avatarConfirm.hidden) pushSystem(data.msg || '没改成，再试一次。');
+        }
         break;
       }
 
@@ -619,7 +665,7 @@
     el.quoteText.textContent = '';
   }
 
-  /* ---------------- 改名 ---------------- */
+  /* ---------------- 改名（原有逻辑，不动） ---------------- */
 
   function startRename() {
     if (!state.self) return;
@@ -649,6 +695,72 @@
       if (e.key === 'Escape') { input.value = ''; commit(); }
     });
     input.addEventListener('blur', commit);
+  }
+
+  /* ---------------- 换头像（新增功能） ---------------- */
+
+  /** 打开调色板 */
+  function openAvatarPicker() {
+    if (!state.self) return;
+    state.pickedColor = state.self.color;
+    el.avatarErr.hidden = true;
+    renderColorGrid();
+    el.avatarModal.hidden = false;
+  }
+
+  function closeAvatarPicker() {
+    el.avatarModal.hidden = true;
+  }
+
+  /** 渲染 24 色调色板 */
+  function renderColorGrid() {
+    if (!el.colorGrid) return;
+    el.colorGrid.innerHTML = '';
+    for (const color of state.colors) {
+      const dot = document.createElement('button');
+      dot.type = 'button';
+      dot.className = 'color-dot';
+      dot.style.background = color;
+      dot.title = color;
+      dot.setAttribute('aria-label', '选择颜色 ' + color);
+      // 底色深 → 对勾用黑色，否则白色对勾看不见
+      if (avatarTextColor(color) === '#2f3336') dot.classList.add('dark');
+      if (color === state.pickedColor) dot.classList.add('sel');
+      dot.addEventListener('click', () => {
+        state.pickedColor = color;
+        for (const n of el.colorGrid.children) n.classList.remove('sel');
+        dot.classList.add('sel');
+        // 选了颜色 → 先问一句「是否确定修改」，不直接改
+        askAvatarConfirm(color);
+      });
+      el.colorGrid.appendChild(dot);
+    }
+  }
+
+  /** 确认框：是否确定修改 */
+  function askAvatarConfirm(color) {
+    if (!state.self) return;
+    paintAvatar(el.avatarPreview, color, avatarText(state.self.name));
+    el.avatarPreviewName.textContent = state.self.name;
+    el.avatarErr.hidden = true;
+    el.avatarConfirm.hidden = false;
+  }
+
+  function closeAvatarConfirm() {
+    el.avatarConfirm.hidden = true;
+  }
+
+  /** 真的改 */
+  function confirmAvatarChange() {
+    const color = state.pickedColor;
+    if (!color) { closeAvatarConfirm(); return; }
+    if (!wsSend({ t: 'avatar', color })) {
+      el.avatarErr.hidden = false;
+      el.avatarErr.textContent = '还没连上服务器，稍后再试。';
+      return;
+    }
+    closeAvatarConfirm();
+    closeAvatarPicker();
   }
 
   /* ---------------- 发送 ---------------- */
@@ -742,6 +854,13 @@
   el.quoteClose.addEventListener('click', clearReplyTo);
   el.moreBtn.addEventListener('click', loadMore);
 
+  /* ---------------- 换头像 ---------------- */
+
+  el.meAvatar.addEventListener('click', openAvatarPicker);
+  el.avatarCancel.addEventListener('click', closeAvatarPicker);
+  el.avatarConfirmOk.addEventListener('click', confirmAvatarChange);
+  el.avatarConfirmCancel.addEventListener('click', closeAvatarConfirm);
+
   /* ---------------- 口令弹窗 ---------------- */
 
   el.keyInput.addEventListener('input', updateKeyLen);
@@ -775,7 +894,10 @@
 
   // 点遮罩不关闭（必须明确选择），但 Esc 可以关
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !el.keyModal.hidden) {
+    if (e.key !== 'Escape') return;
+    if (!el.avatarConfirm.hidden) { closeAvatarConfirm(); return; }
+    if (!el.avatarModal.hidden) { closeAvatarPicker(); return; }
+    if (!el.keyModal.hidden) {
       closeKeyModal();
       setConn('未输入口令，无法进入房间', false);
     }

@@ -588,3 +588,92 @@ body {
 }
 
 .modal-btn:active { opacity: 0.85; }
+
+/* ---------------- 换头像（只改头像，别的不动） ---------------- */
+
+/* 侧栏自己头像变成按钮 */
+.avatar-pick {
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.avatar-pick:hover {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12), 0 0 0 3px rgba(74, 158, 255, 0.25);
+}
+
+.modal-avatar { max-width: 340px; }
+
+.avatar-xl {
+  width: 56px;
+  height: 56px;
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.avatar-xl[data-len="2"] { font-size: 17px; }
+.avatar-xl[data-len="3"] { font-size: 15px; }
+
+.avatar-preview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  margin-bottom: 16px;
+  background: #f5f8fb;
+  border-radius: 12px;
+}
+
+.avatar-preview-name {
+  font-size: 17px;
+  font-weight: 600;
+  color: #1c1e21;
+  word-break: break-all;
+}
+
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.color-dot {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+}
+
+.color-dot:hover { transform: scale(1.12); }
+
+.color-dot.sel {
+  border-color: #4a9eff;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12), 0 0 0 2px rgba(74, 158, 255, 0.35);
+}
+
+/* 选中标记：一个小对勾，不依赖颜色单独表达状态 */
+.color-dot.sel::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 7px;
+  height: 12px;
+  border: solid #fff;
+  border-width: 0 2.5px 2.5px 0;
+  transform: translate(-50%, -58%) rotate(45deg);
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.45));
+}
+
+/* 深色底上的白色对勾看不见时改用黑描边 */
+.color-dot.sel.dark::after {
+  border-color: #1c1e21;
+  filter: none;
+}
+

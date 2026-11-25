@@ -35,6 +35,10 @@ const MAX_TEXT = 1000;
 const MAX_NAME = 12;
 const PAGE_SIZE = 50;
 
+// 换头像色的最小间隔：防止连点把广播刷爆。
+// 只针对「颜色」计时，不影响改名（改名走原来的逻辑，一行没动）。
+const COLOR_COOLDOWN_MS = Number(process.env.COLOR_COOLDOWN_MS) || 1000;
+
 // 消息保留 7 天，定时清理
 // 保留期和清理间隔都做成环境变量可调 —— 测试里用小值快速验证
 // 「消息过期 → 用户行被清理 → 昵称释放」这条链路。
@@ -766,6 +770,9 @@ wss.on('connection', (ws, req) => {
     users: [...clients.values()].map(publicUser),
     history: rows.reverse().map(toMessage),
     hasMore: total > rows.length,
+    // 头像可选的颜色列表 —— 由服务端下发，客户端照着渲染调色板，
+    // 这样客户端和服务端永远用同一份色池，不会出现「选了却没生效」。
+    colors: COLOR_POOL,
   });
 
   broadcast({ t: 'join', user: publicUser(user) }, ws);
@@ -815,7 +822,7 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
-      /* ---------- 改名 ---------- */
+      /* ---------- 改名（原有逻辑，不动） ---------- */
       case 'nick': {
         const raw = String(data.name ?? '').trim().slice(0, MAX_NAME);
         if (!raw) return;
@@ -834,6 +841,30 @@ wss.on('connection', (ws, req) => {
         }
         user.name = name;
         broadcast({ t: 'nick', user: publicUser(user) });
+        break;
+      }
+
+      /* ---------- 换头像色（新增） ---------- */
+      case 'avatar': {
+        const now = Date.now();
+        const c = String(data.color ?? '').trim().toLowerCase();
+        // 只认服务端色池里的颜色 —— 客户端传什么都不能写进库里
+        if (!COLOR_POOL.includes(c)) {
+          send(ws, { t: 'avatarAck', ok: false, msg: '这个颜色不可用' });
+          return;
+        }
+        if (c !== user.color) {
+          // 连点保护：1 秒内不让反复换（防刷广播）
+          if (user.colorAt && now - user.colorAt < COLOR_COOLDOWN_MS) {
+            send(ws, { t: 'avatarAck', ok: false, msg: '换得太快啦，等一下再试' });
+            return;
+          }
+          user.color = c;
+          user.colorAt = now;
+          S.renameUser.run(user.name, user.color, now, user.id);
+        }
+        broadcast({ t: 'avatar', user: publicUser(user) });
+        send(ws, { t: 'avatarAck', ok: true, user: publicUser(user) });
         break;
       }
 
