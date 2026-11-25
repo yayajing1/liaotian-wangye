@@ -72,52 +72,123 @@
 
 ## 三、怎么跑（三条命令）
 
+### 全流程速查
+
+整个过程分 4 个阶段，**每阶段都有明确的验证点**，不要跳着做：
+
+| 阶段 | 动作 | 验证 | 卡住了怎么办 |
+|---|---|---|---|
+| **1. 放行端口** | 防火墙加 80/443/8000 | 规则列表有 3 条 | 等 1-2 分钟生效 |
+| **2. 部署** | clone + deploy.sh | `curl http://IP:8000/chat` 返回 200 | 看 `journalctl -u chat-room` |
+| **3. 配 HTTPS** | bash deploy/https-setup.sh | `curl https://IP/chat` 返回 200 | 看 `deploy/HTTPS配置.md` 排查表 |
+| **4. 收尾** | **删掉 8000 规则** | 防火墙只剩 80/443 | — |
+
+> **阶段 2 和阶段 3 是分开的**，故意这样设计：
+> 先用 HTTP 确认服务活着，再用 HTTPS 升级。混在一起的话，
+> 出问题时分不清是「程序没起来」还是「证书没签下来」。
+
 ### 第 0 步：控制台放行端口 ⚠️ 必须先做
 
-轻量应用服务器 → 控制台 → 实例 → **防火墙** → **添加规则**，加两条：
+轻量应用服务器 → 控制台 → 实例 → **防火墙** → **添加规则**，加三条：
 
-| 协议 | 端口 | 授权对象 | 用途 |
-|---|---|---|---|
-| TCP | `80` | `0.0.0.0/0` | ACME 签证书验证用 |
-| TCP | `443` | `0.0.0.0/0` | HTTPS 入口 |
+| 协议 | 端口 | 授权对象 | 用途 | 后续 |
+|---|---|---|---|---|
+| TCP | `80` | `0.0.0.0/0` | ACME 签证书验证用 | 保留 |
+| TCP | `443` | `0.0.0.0/0` | HTTPS 入口 | 保留 |
+| TCP | `8000` | `0.0.0.0/0` | **临时**：HTTP 直连调试 | ⚠️ **装完 HTTPS 后删掉** |
 
 > ECS 的话是 **安全组 → 配置规则 → 入方向** 手动添加。
+
+**为什么要临时开 8000**：部署完到装好 HTTPS 之间有个时间差，
+先用 `http://IP:8000/chat` 确认服务真的跑起来了，比等 HTTPS 全套跑完再排查要省事得多。
+
+**为什么最后要删**：装完 HTTPS 后，`https-setup.sh` 会把 Node 改成
+**只监听 127.0.0.1**（8000 端口不再对公网监听），
+这时 8000 这条防火墙规则**已经没有任何作用**，删掉它只是让规则表更干净、
+减少一个对外暴露的端口。
+
+> 也就是说：**8000 规则留着的那段时间里，真正的门禁是「房间口令」。**
+> 口令是 12 位随机 hex（48 位熵），暴力猜不现实，但扫描器能看到
+> 「这个端口有个 WebSocket 服务在跑」—— 内测阶段流量极小，可接受。
 >
-> `8000` 端口：装完 HTTPS 后 Node 会改成**只监听 127.0.0.1**，
-> 由 Nginx 转发，所以 8000 **不用放行**了（反而更安全）。
-> 但如果你还没跑 HTTPS 脚本，临时用 8000 直连的话还是得放行。
+> ⚠️ 别忘了删。删的方式：防火墙规则列表里找到 8000 那条，
+> 点右边的「删除」→ 确认。
 
 ### 第 1 步：装程序（GitHub 拉代码，免传文件）
 
 ```bash
 mkdir -p /opt/chat-room && cd /opt/chat-room
 git clone --depth 1 https://github.com/yayajing1/liaotian-wangye.git app
-cd app && bash deploy/deploy.sh --git https://github.com/yayajing1/liaotian-wangye.git --https
+cd app && bash deploy/deploy.sh
 ```
 
-### 第 2 步：验证
+> 脚本会**自动识别**「代码就在当前目录」，就地安装，
+> 不会重复 clone，也不会把代码和数据目录拆到两个地方。
+>
+> 也可以一条命令搞定（脚本自己去 GitHub 拉）：
+> ```bash
+> mkdir -p /opt/chat-room && cd /opt/chat-room
+> bash <(curl -fsSL https://raw.githubusercontent.com/yayajing1/liaotian-wangye/main/deploy/deploy.sh) --git https://github.com/yayajing1/liaotian-wangye.git
+> ```
+
+**验证阶段 2**（先确认服务活着）：
+
+```bash
+# 在你自己的电脑上跑，把 IP 换成实际公网 IP
+curl -s -o /dev/null -w "%{http_code}\n" http://<你的IP>:8000/chat
+# 期望输出 200
+```
+
+浏览器打开 `http://<你的IP>:8000/chat` 能看到聊天室界面，也算通过。
+
+### 第 2 步：配 HTTPS
+
+```bash
+cd /opt/chat-room/app
+bash deploy/https-setup.sh
+```
+
+**验证阶段 3**：
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" https://<你的IP>/chat
+# 期望输出 200
+
+# 看证书签给谁了 —— 应该出现 IP:xxx
+echo | openssl s_client -connect <你的IP>:443 2>/dev/null | openssl x509 -noout -text | grep -A1 "Subject Alternative Name"
+```
 
 浏览器打开 `https://<你的IP>/chat`，地址栏应该有 🔒。
 
-命令行验证：
+### 第 3 步：删掉 8000 规则（收尾）
+
+回到阿里云控制台 → 轻量应用服务器 → 实例 → **防火墙** →
+找到 8000 那条规则 → 点右边的**「删除」** → 确认。
+
+删完再测一次，确认 HTTPS 仍然通：
 
 ```bash
-# 证书签发对象
-echo | openssl s_client -connect <你的IP>:443 2>/dev/null | openssl x509 -noout -subject -dates
-
-# 证书里应该能看到 IP 地址
-echo | openssl s_client -connect <你的IP>:443 2>/dev/null | openssl x509 -noout -text | grep -A1 "Subject Alternative Name"
-
-# HTTPS 页面通不通
-curl -s -o /dev/null -w "%{http_code}\n" https://<你的IP>/chat
+curl -s -o /dev/null -w "HTTPS: %{http_code}\n" https://<你的IP>/chat     # 期望 200
+curl -s -o /dev/null -w "HTTP8000: %{http_code}\n" http://<你的IP>:8000/chat  # 期望 000（连不上才对）
 ```
 
-### 第 3 步：单独跑（如果部署时跳过了 HTTPS）
+第二条返回 `000`（连接超时/拒绝）说明 8000 确实已经关闭了 —— 这正是预期结果。
 
-```bash
-cd /opt/chat-room
-bash deploy/https-setup.sh
+> 也可以在服务器上确认 Node 只监听本机：
+> ```bash
+> ss -tln | grep 8000
+> # 期望看到 127.0.0.1:8000，而不是 0.0.0.0:8000 或 *:8000
+> ```
+
+### 第 4 步：发链接给朋友
+
+脚本最后会打印带口令的链接：
+
 ```
+https://<你的IP>/chat#key=xxxxxxxxxxxx
+```
+
+复制这一行发给朋友即可 —— 他点开直接进，地址栏有 🔒，聊天走 wss。
 
 ---
 

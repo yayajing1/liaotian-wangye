@@ -23,12 +23,13 @@ APP_DIR="/opt/chat-room"
 NODE_PORT="8000"
 PUB_IP=""
 SKIP_CERT=0
+APP_DIR_EXPLICIT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --ip)   PUB_IP="$2"; shift 2 ;;
     --port) NODE_PORT="$2"; shift 2 ;;
-    --dir)  APP_DIR="$2"; shift 2 ;;
+    --dir)  APP_DIR="$2"; APP_DIR_EXPLICIT=1; shift 2 ;;
     --skip-cert) SKIP_CERT=1; shift ;;
     -h|--help)
       echo "用法: bash https-setup.sh [--ip 公网IP] [--port Node端口] [--dir 安装目录] [--skip-cert 只配Nginx不签证书]"
@@ -42,6 +43,14 @@ WEBROOT="/var/www/letsencrypt"
 
 C_G="\033[32m"; C_Y="\033[33m"; C_R="\033[31m"; C_C="\033[36m"; C_0="\033[0m"
 say() { printf "%b\n" "$1"; }
+
+# 自动识别安装目录 —— 跟 deploy.sh 保持一致：
+# 脚本所在目录就有 server.js 时就地操作，避免代码和 data/ 错位
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "$APP_DIR_EXPLICIT" -eq 0 ] && [ -f "$SCRIPT_DIR/server.js" ]; then
+  APP_DIR="$SCRIPT_DIR"
+  say "      代码目录：${APP_DIR}"
+fi
 
 say ""
 say "${C_C}  ============================================${C_0}"

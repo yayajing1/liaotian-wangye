@@ -24,11 +24,12 @@ PKG_URL=""
 SELF_URL=""
 GIT_REPO=""
 WITH_HTTPS=0
+APP_DIR_EXPLICIT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
-    --dir)  APP_DIR="$2"; shift 2 ;;
+    --dir)  APP_DIR="$2"; APP_DIR_EXPLICIT=1; shift 2 ;;
     --url)  PKG_URL="$2"; shift 2 ;;
     --self) SELF_URL="$2"; shift 2 ;;
     --git)  GIT_REPO="$2"; shift 2 ;;
@@ -42,6 +43,22 @@ done
 
 # --dir 改了安装目录，数据目录跟着走
 DATA_DIR="${APP_DIR}/data"
+
+C_G="\033[32m"; C_Y="\033[33m"; C_R="\033[31m"; C_C="\033[36m"; C_0="\033[0m"
+say() { printf "%b\n" "$1"; }
+
+# 自动识别安装目录：
+# 如果脚本自己所在目录就有 server.js，说明用户已经手动 clone 好了
+# （比如 git clone 到 /opt/chat-room/app 然后 cd app 跑本脚本），
+# 那就装在原地，不要再往 /opt/chat-room 复制一份 —— 否则会出现
+# 「代码在 app/ 里、data/ 在 /opt/chat-room/data」这种错位，
+# systemd 的 WorkingDirectory 和实际代码位置对不上。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "$APP_DIR_EXPLICIT" -eq 0 ] && [ -f "$SCRIPT_DIR/server.js" ]; then
+  APP_DIR="$SCRIPT_DIR"
+  DATA_DIR="${APP_DIR}/data"
+  say "      检测到代码已在 ${SCRIPT_DIR}，就地安装"
+fi
 
 C_G="\033[32m"; C_Y="\033[33m"; C_R="\033[31m"; C_C="\033[36m"; C_0="\033[0m"
 say() { printf "%b\n" "$1"; }
