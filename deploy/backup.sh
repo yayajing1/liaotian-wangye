@@ -13,6 +13,18 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/chat-room}"
 DATA_DIR="${DATA_DIR:-$APP_DIR/data}"
 BACKUP_DIR="${1:-$APP_DIR/backups}"
+APP_DIR_EXPLICIT=0
+[ -n "${DATA_DIR:-}" ] && DATA_DIR_EXPLICIT=1
+
+# 自动识别安装目录 —— 跟 deploy.sh / https-setup.sh 保持一致：
+# 脚本所在目录就有 server.js 时就地操作，避免代码和 data/ 错位。
+# （不修的话，服务器实际装在 /opt/chat-room/app，
+#   而脚本默认找 /opt/chat-room/data → 报「数据目录不存在」）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ "$DATA_DIR_EXPLICIT" -eq 0 ] && [ -f "$SCRIPT_DIR/server.js" ]; then
+  APP_DIR="$SCRIPT_DIR"
+  DATA_DIR="${APP_DIR}/data"
+fi
 
 if [ ! -d "$DATA_DIR" ]; then
   echo "[ERROR] 数据目录不存在: $DATA_DIR" >&2
@@ -27,12 +39,39 @@ TS="$(date +%Y%m%d-%H%M%S)"
 OUT="$BACKUP_DIR/chat-data-$TS.tar.gz"
 
 # SQLite 正在写入时直接打包可能拿到损坏的库，
-# 先用 .backup 命令做一致性快照，再连同 room.key 一起打包。
+# 所以先做一致性快照，再连同 room.key 一起打包。
+#
+# 优先用 sqlite3 命令行；没有的话用 Node 内置的 node:sqlite（Node 22+ 自带），
+# 两者都能做真正的在线快照，比直接 tar 安全。
+SNAP="$BACKUP_DIR/chat.db.snap"
+DB=""
+
 if command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 "$DATA_DIR/chat.db" ".backup '$BACKUP_DIR/chat.db.snap'"
-  DB="$BACKUP_DIR/chat.db.snap"
+  echo "[快照] 用 sqlite3 命令行做一致性快照 ..."
+  if sqlite3 "$DATA_DIR/chat.db" ".backup '$SNAP'" 2>/dev/null && [ -s "$SNAP" ]; then
+    DB="$SNAP"
+  fi
+elif command -v node >/dev/null 2>&1; then
+  echo "[快照] 用 Node 内置 node:sqlite 做一致性快照 ..."
+  SNAP_TMP="$BACKUP_DIR/.snap-$$.js"
+  cat > "$SNAP_TMP" <<'SNAPJS'
+const { DatabaseSync } = require("node:sqlite");
+const src = process.argv[2];
+const dst = process.argv[3].replace(/'/g, "''");
+const db = new DatabaseSync(src);
+db.exec("VACUUM INTO '" + dst + "'");
+db.close();
+SNAPJS
+  if node "$SNAP_TMP" "$DATA_DIR/chat.db" "$SNAP" 2>/dev/null && [ -s "$SNAP" ]; then
+    DB="$SNAP"
+  fi
+  rm -f "$SNAP_TMP" 2>/dev/null || true
 else
-  echo "[提示] 未找到 sqlite3 命令，直接打包（数据量极小，风险低）"
+  echo "[提示] 没有 sqlite3 也没有 node，直接打包（数据量极小，风险低）"
+fi
+
+if [ -z "$DB" ]; then
+  echo "[提示] 快照失败，改为直接打包"
   DB="$DATA_DIR/chat.db"
 fi
 
@@ -40,7 +79,7 @@ tar -czf "$OUT" -C "$(dirname "$DB")" "$(basename "$DB")" \
   -C "$DATA_DIR" room.key 2>/dev/null \
   || tar -czf "$OUT" -C "$DATA_DIR" chat.db room.key
 
-[ -f "$BACKUP_DIR/chat.db.snap" ] && rm -f "$BACKUP_DIR/chat.db.snap"
+[ -f "$SNAP" ] && rm -f "$SNAP"
 
 echo ""
 echo "  备份完成 ✓"
