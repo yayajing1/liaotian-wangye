@@ -784,7 +784,10 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
+    if (process.env.WS_DEBUG) {
+      console.log(`[ws-close] cid=${ws.clientId || '-'} user=${user.name} code=${code} reason=${String(reason || '')} replaced=${!!ws.replaced} alive=${ws.isAlive}`);
+    }
     clients.delete(ws);
     if (ws.clientId && cidClients.get(ws.clientId) === ws) cidClients.delete(ws.clientId);
     // 被同浏览器新连接顶替的旧连接不算"离开"，否则成员列表会闪一下
