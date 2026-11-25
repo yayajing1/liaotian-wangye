@@ -473,6 +473,13 @@ fi
 say ""
 say "[5/6] 配置 443 HTTPS ..."
 
+# 证书类型标签（写进 nginx 注释里，日后排查方便）
+if [ -n "$DOMAIN" ]; then
+  CERT_LABEL="域名证书（90 天，自动续期）"
+else
+  CERT_LABEL="IP 证书（160 小时，自动续期）"
+fi
+
 if [ -s "$SSL_DIR/fullchain.pem" ] && [ -s "$SSL_DIR/privkey.pem" ]; then
   cat > /etc/nginx/sites-available/chat-room <<EOF
 # HTTP：只留 ACME 验证目录，其余跳 HTTPS
@@ -491,7 +498,7 @@ server {
     }
 }
 
-# HTTPS：IP 证书 + 反代到 Node
+# HTTPS：${CERT_LABEL}证书 + 反代到 Node
 server {
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
@@ -503,6 +510,23 @@ server {
     ssl_prefer_server_ciphers off;
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 1d;
+    # 会话票据：省掉重复的 TLS 握手，手机上明显更快
+    ssl_session_tickets on;
+
+    # ---------- 安全响应头 ----------
+    #
+    # HSTS：告诉浏览器「这个域名以后只准走 HTTPS」。
+    # 有了它，用户就不会再看到「连接不安全，可以继续访问」那个提示 ——
+    # 浏览器会自己强制跳 https。
+    #
+    # ⚠️ 用了 HSTS 之后，用户没法再退回 http 访问这个域名。
+    #    如果证书出问题了，得先手动删掉浏览器的 HSTS 缓存
+    #    （Chrome: chrome://net-internals/#hsts → Delete domain security policies）。
+    #    所以务必确认证书签发成功、自动续期正常之后再上这条。
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # 不告诉别人服务器用的是 nginx
+    server_tokens off;
 
     # WebSocket 升级（关键：少了这段聊天发不出去）
     location /ws {
@@ -632,6 +656,8 @@ say "${C_G}  ============================================${C_0}"
 say ""
 
 # 访问地址：有域名优先用域名，没有就用 IP
+# ⚠️ CERT_LABEL 必须在写 nginx 配置**之前**算好 ——
+#    下面生成 nginx 配置时要用它（写进注释里，方便日后排查）。
 if [ -n "$DOMAIN" ]; then
   ACCESS_HOST="$DOMAIN"
   CERT_LABEL="域名证书（90 天，自动续期）"

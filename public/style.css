@@ -1005,3 +1005,127 @@ body {
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* ================================================================
+   账号白框（登入在上、注册在下）
+   ------------------------------------------------------------
+   用户要求：整块是白框，上面一个「登入」框，下面一个「注册」框，
+   两个按钮。所以这里是「两个独立的卡片」，不是 Tab 切换 ——
+   打开就能同时看见两个按钮，不用点来点去找。
+   ================================================================ */
+
+.modal-account {
+  max-width: 380px;
+  /* 白框：纯白底 + 细边框，和其它弹窗区分开 */
+  background: #fff;
+  border: 1px solid #e3e8ee;
+  border-radius: 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.24);
+}
+
+.acc-box {
+  border: 1px solid #e3e8ee;
+  border-radius: 12px;
+  padding: 13px 14px 15px;
+  background: #fbfcfe;
+  margin-bottom: 12px;
+}
+
+/* 注册框在最下面，和登入框之间留点空隙 */
+.acc-box-reg {
+  background: #f7fafd;
+}
+
+.acc-box-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-bottom: 4px;
+}
+
+.acc-box-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1c1e21;
+  /* 「登入」「注册」两个字用竖线隔开，视觉上像两个独立分区 */
+  position: relative;
+  padding-right: 11px;
+}
+
+.acc-box-title::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: #dbe2ea;
+}
+
+.acc-box-note {
+  font-size: 11.5px;
+  color: #8a9199;
+  line-height: 1.4;
+}
+
+.acc-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.acc-actions .modal-btn {
+  flex: 1;
+  padding: 11px 14px;
+  font-size: 14.5px;
+}
+
+/* 已登录状态条 */
+.acc-state {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 14px;
+  background: #eaf7f0;
+  border: 1px solid #c9e8d7;
+  border-radius: 11px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #2c7a55;
+  margin-bottom: 12px;
+}
+
+.acc-logout {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  font-weight: 400;
+  background: #fff;
+}
+
+.acc-foot {
+  display: flex;
+  margin-top: 2px;
+}
+
+.acc-foot .modal-btn {
+  flex: 1;
+}
+
+/* 账号名输入框不用等宽字体 —— 账号名可能是中文 */
+#accLoginName,
+#accRegName {
+  font-family: inherit;
+  letter-spacing: 0;
+}
+
+/* 手机上两个框叠起来会很高 —— 收紧一点 */
+@media (max-width: 760px) {
+  .modal-account { max-width: 100%; padding: 16px 14px 12px; }
+  .acc-box { padding: 11px 12px 13px; margin-bottom: 10px; }
+  .acc-box-title { font-size: 14.5px; }
+  .acc-box-note { font-size: 11px; }
+  .acc-actions { margin-top: 12px; }
+  .acc-actions .modal-btn { padding: 10px 12px; font-size: 14px; }
+}

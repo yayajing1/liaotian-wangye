@@ -27,6 +27,9 @@
       <ul class="users" id="userList"></ul>
 
       <div class="side-foot">
+        <button type="button" class="side-link" id="accountBtn" title="注册 / 登录账号">
+          <span class="side-link-ico">👤</span><span class="side-link-txt" id="accountBtnTxt">注册账号</span>
+        </button>
         <button type="button" class="side-link" id="settingsBtn" title="登录密码设置">
           <span class="side-link-ico">⚙</span><span class="side-link-txt">登录设置</span>
         </button>
@@ -212,6 +215,67 @@
       <div class="modal-actions">
         <button type="button" class="modal-btn" id="loginCancel">取消</button>
         <button type="button" class="modal-btn primary" id="loginOk">登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 账号：白框弹窗。上面「登入」框，下面「注册」框 -->
+  <div class="modal-mask" id="accountModal" hidden>
+    <div class="modal modal-account" role="dialog" aria-modal="true" aria-labelledby="accountTitle">
+      <h2 class="modal-title" id="accountTitle">账号</h2>
+      <p class="modal-desc" id="accountDesc">
+        登录后，这个名字、头像和聊天记录在任何设备上都能找回来。
+      </p>
+
+      <!-- 上半部分：登入 -->
+      <div class="acc-box">
+        <div class="acc-box-head">
+          <span class="acc-box-title">登入</span>
+          <span class="acc-box-note">已有账号？用账号密码进来</span>
+        </div>
+        <label class="field-label" for="accLoginName">账号</label>
+        <input class="modal-input" id="accLoginName" type="text" autocomplete="username"
+          autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="你的账号名">
+        <label class="field-label" for="accLoginPw">密码</label>
+        <input class="modal-input" id="accLoginPw" type="password" autocomplete="current-password"
+          placeholder="你的密码" spellcheck="false">
+        <p class="modal-err" id="accLoginErr" hidden></p>
+        <div class="acc-actions">
+          <button type="button" class="modal-btn primary" id="accLoginBtn">登入</button>
+        </div>
+      </div>
+
+      <!-- 下半部分：注册 -->
+      <div class="acc-box acc-box-reg">
+        <div class="acc-box-head">
+          <span class="acc-box-title">注册</span>
+          <span class="acc-box-note">第一次来？建一个账号</span>
+        </div>
+        <label class="field-label" for="accRegName">账号</label>
+        <input class="modal-input" id="accRegName" type="text" autocomplete="username"
+          autocapitalize="off" autocorrect="off" spellcheck="false"
+          placeholder="3-20 位，字母或数字">
+        <label class="field-label" for="accRegPw">密码</label>
+        <input class="modal-input" id="accRegPw" type="password" autocomplete="new-password"
+          placeholder="至少 8 位，含字母和数字" spellcheck="false">
+        <label class="field-label" for="accRegPw2">再输一次</label>
+        <input class="modal-input" id="accRegPw2" type="password" autocomplete="new-password"
+          placeholder="再输一次密码" spellcheck="false">
+        <p class="modal-err" id="accRegErr" hidden></p>
+        <div class="acc-actions">
+          <button type="button" class="modal-btn primary" id="accRegBtn">注册</button>
+        </div>
+      </div>
+
+      <!-- 已登录时的状态条 -->
+      <div class="acc-state" id="accState" hidden>
+        <span class="pw-dot"></span>
+        <span id="accStateName">已登录</span>
+        <button type="button" class="modal-btn danger acc-logout" id="accLogoutBtn">退出登录</button>
+      </div>
+
+      <div class="acc-foot">
+        <button type="button" class="modal-btn" id="accCloseBtn">先不登录</button>
       </div>
     </div>
   </div>

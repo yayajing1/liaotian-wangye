@@ -214,6 +214,55 @@ db.exec(`
 `);
 db.exec('CREATE INDEX IF NOT EXISTS idx_user_devices_user ON user_devices(user_id);');
 
+// ---- 账号表 ----
+//
+// 账号 = 「用户名 + 密码」，用来跨设备认回同一个身份。
+// 和 users 表的关系：accounts.user_id 指向 users.id ——
+// 一个账号绑一个聊天身份（昵称/头像/历史消息都跟着 users 行走）。
+//
+// 为什么和 users.login_hash（上一轮做的「个人登录密码」）并存：
+//   login_hash  → 昵称 + 密码，认回身份（老方案，靠昵称找人）
+//   accounts    → 账号名 + 密码，认回身份（新方案，账号名唯一、不占昵称）
+// 两套并存不冲突：老用户还能用老办法，新用户用账号。
+//
+// 密码只存 scrypt 哈希 + 随机盐，**永不存明文**。
+// fail_count / locked_until → 连续输错密码就锁账号，防暴力破解。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS accounts (
+    id           TEXT PRIMARY KEY,
+    username     TEXT NOT NULL UNIQUE,   -- 账号名（已归一化：小写去空格）
+    display_name TEXT NOT NULL,           -- 账号名原样（登录时显示用）
+    pass_hash    TEXT NOT NULL,
+    pass_salt    TEXT NOT NULL,
+    user_id      TEXT NOT NULL,           -- 绑定的聊天身份
+    created_at   INTEGER NOT NULL,
+    last_login   INTEGER,
+    fail_count   INTEGER NOT NULL DEFAULT 0,
+    locked_until INTEGER NOT NULL DEFAULT 0
+  );
+`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_accounts_user ON accounts(user_id);');
+
+// ---- 会话表 ----
+//
+// 登入成功后服务端发一个 session token，客户端存在 localStorage。
+// 之后每次连接带上它 → 服务端直接认回身份，不用再输密码。
+//
+// ⚠️ 库里只存 token 的 sha256 —— 就算数据库被人整个拖走，
+//    拿到的哈希也换不出可用的 token（会话劫持成本极高）。
+// expires_at 支持「滑动续期」：每次用到就往后延，长期活跃的会话不会被踢。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS account_sessions (
+    token_hash TEXT PRIMARY KEY,          -- sha256(token)，不存明文
+    account_id TEXT NOT NULL,
+    client_id  TEXT,                      -- 绑到哪台设备（可空）
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL
+  );
+`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_account ON account_sessions(account_id);');
+
 // 昵称全局唯一（在线 + 历史一起算）
 //
 // 老版本只在「在线成员」之间去重：人一离线昵称就被释放，
@@ -326,6 +375,34 @@ const S = {
   // 某人发过多少条消息 → 决定临时身份能不能直接删掉
   countMsgs: db.prepare('SELECT COUNT(*) AS c FROM messages WHERE sender_id = ?'),
   deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
+
+  /* ---------- 账号 ---------- */
+  // 按归一化账号名查（username 存的是小写去空格版）
+  findAccount: db.prepare('SELECT * FROM accounts WHERE username = ?'),
+  findAccountById: db.prepare('SELECT * FROM accounts WHERE id = ?'),
+  findAccountByUser: db.prepare('SELECT * FROM accounts WHERE user_id = ?'),
+  insertAccount: db.prepare(`
+    INSERT INTO accounts (id, username, display_name, pass_hash, pass_salt, user_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `),
+  touchAccountLogin: db.prepare('UPDATE accounts SET last_login = ? WHERE id = ?'),
+  bumpAccountFail: db.prepare('UPDATE accounts SET fail_count = fail_count + 1, locked_until = ? WHERE id = ?'),
+  resetAccountFail: db.prepare('UPDATE accounts SET fail_count = 0, locked_until = 0 WHERE id = ?'),
+  updateAccountPw: db.prepare('UPDATE accounts SET pass_hash = ?, pass_salt = ? WHERE id = ?'),
+  countAccounts: db.prepare('SELECT COUNT(*) AS c FROM accounts'),
+
+  /* ---------- 会话 ---------- */
+  insertSession: db.prepare(`
+    INSERT INTO account_sessions (token_hash, account_id, client_id, created_at, expires_at, last_seen)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `),
+  // 取会话 + 顺带滑动续期
+  getSession: db.prepare('SELECT * FROM account_sessions WHERE token_hash = ?'),
+  touchSession: db.prepare('UPDATE account_sessions SET expires_at = ?, last_seen = ? WHERE token_hash = ?'),
+  bindSessionDevice: db.prepare('UPDATE account_sessions SET client_id = ? WHERE token_hash = ?'),
+  deleteSession: db.prepare('DELETE FROM account_sessions WHERE token_hash = ?'),
+  deleteAccountSessions: db.prepare('DELETE FROM account_sessions WHERE account_id = ?'),
+  deleteExpiredSessions: db.prepare('DELETE FROM account_sessions WHERE expires_at < ?'),
   // 在线成员的心跳（防止久不发言的在线用户被清理掉）
   touchUser: db.prepare('UPDATE users SET last_seen = ? WHERE id = ?'),
   insertMsg: db.prepare(
@@ -350,7 +427,7 @@ const S = {
   `),
   countAll: db.prepare('SELECT COUNT(*) AS c FROM messages'),
   deleteOlder: db.prepare('DELETE FROM messages WHERE created_at < ?'),
-  // ⚠️ 设过个人登录密码的用户不会被自动清理 ——
+  // ⚠️ 设过个人登录密码、或已绑定账号的用户不会被自动清理 ——
   //    否则「我设了密码，7 天没用，密码自己没了」，登录功能等于白做。
   //    代价是这个名字会被一直占着，但对这种小房间完全够用。
   deleteStaleUsers: db.prepare(`
@@ -358,6 +435,7 @@ const S = {
     WHERE id NOT IN (SELECT DISTINCT sender_id FROM messages)
       AND last_seen < ?
       AND (login_hash IS NULL OR login_hash = '')
+      AND id NOT IN (SELECT user_id FROM accounts)
   `),
 };
 
@@ -664,26 +742,73 @@ function publicUser(u) {
 /* 个人登录密码                                                        */
 /* ================================================================== */
 
-// scrypt 参数：N=16384 在这台小机器上单次约 40~80ms，
-// 既不会慢到影响聊天，又足够挡住「拿哈希离线爆破」。
-const SCRYPT_OPTS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+// scrypt 参数：安全系数调高一档。
+//
+// N=16384 → N=32768，内存占用 32MB→64MB，单次耗时约翻倍。
+// 这台机器只有 1.6G 内存，但 scryptSync 是**同步**的 —— 同一时刻只跑一个，
+// 峰值内存就是 64MB，不会因为并发登录叠加。
+//
+// ⚠️ 换参数后老哈希会验不过（参数不一样，算法结果就不同）。
+// 所以哈希必须**自描述**：把 N/r/p 和盐一起写进哈希串里，
+// 验证时按串里写的参数重算。这样以后再调参数也不会作废老密码。
+const SCRYPT_N = 32768;
+const SCRYPT_R = 8;
+const SCRYPT_P = 1;
+const SCRYPT_OPTS = { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: 128 * 1024 * 1024 };
 
-/** 生成密码哈希 + 随机盐 */
+// 旧版参数：上一轮做的「个人登录密码」用的就是这套。
+// 库里那些哈希没有自描述信息，只能按老参数验 → 保留一份专门给它用。
+const SCRYPT_LEGACY = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+
+// 自描述哈希的前缀。以后再改参数，只改这里的版本号就行。
+const HASH_PREFIX = 's2';
+
+/**
+ * 生成密码哈希 + 随机盐
+ *
+ * 返回的 hash 是自描述串：`s2$N$r$p$盐$哈希`
+ * —— 参数、盐、结果全在里面，验证时不需要额外的列。
+ * （兼容老格式：verifyPassword 会自动识别。）
+ */
 function hashPassword(pw) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.scryptSync(String(pw), salt, 32, SCRYPT_OPTS).toString('hex');
-  return { salt, hash };
+  return { salt, hash: `${HASH_PREFIX}$${SCRYPT_N}$${SCRYPT_R}$${SCRYPT_P}$${salt}$${hash}` };
 }
 
 /**
  * 校验密码。
  * 用 timingSafeEqual 比字节，避免「逐字符猜」的时间差。
+ *
+ * 支持两种格式：
+ *   1. 自描述串  s2$N$r$p$salt$hash  → 按串里的参数重算
+ *   2. 老格式    裸 hex + 单独的 salt 列 → 按老参数（SCRYPT_LEGACY）重算
  */
 function verifyPassword(pw, hash, salt) {
-  if (!hash || !salt) return false;
+  if (!hash) return false;
+  const raw = String(hash);
+
+  let opts = SCRYPT_LEGACY;
+  let useSalt = salt;
+  let expected = raw;
+
+  const parts = raw.split('$');
+  if (parts.length === 6 && parts[0] === HASH_PREFIX) {
+    const [, n, r, p, s, h] = parts;
+    opts = {
+      N: Number(n) || SCRYPT_N,
+      r: Number(r) || SCRYPT_R,
+      p: Number(p) || SCRYPT_P,
+      maxmem: 128 * 1024 * 1024,
+    };
+    useSalt = s;
+    expected = h;
+  }
+
+  if (!useSalt || !expected) return false;
   try {
-    const calc = crypto.scryptSync(String(pw), salt, 32, SCRYPT_OPTS);
-    const known = Buffer.from(String(hash), 'hex');
+    const calc = crypto.scryptSync(String(pw), useSalt, 32, opts);
+    const known = Buffer.from(expected, 'hex');
     if (known.length !== calc.length) return false;
     return crypto.timingSafeEqual(known, calc);
   } catch {
@@ -691,15 +816,178 @@ function verifyPassword(pw, hash, salt) {
   }
 }
 
-const LOGIN_PW_MIN = 4;
+/**
+ * 这个哈希是不是用老参数算的（该升级成新参数了）。
+ * 老参数强度低，能验就顺手续一次强度 —— 用户完全无感。
+ */
+function needsRehash(hash) {
+  const parts = String(hash || '').split('$');
+  if (parts.length === 6 && parts[0] === HASH_PREFIX) {
+    return Number(parts[1]) < SCRYPT_N;
+  }
+  return true;    // 老格式（裸 hex）→ 需要升级
+}
+
+const LOGIN_PW_MIN = 8;      // 安全系数调高：最少 8 位
 const LOGIN_PW_MAX = 64;
 
-/** 密码长度校验，返回 null 表示没问题，否则返回一句提示 */
+/**
+ * 常见弱口令 —— 即便满足「有字母有数字」也得拦掉。
+ *
+ * 「12345678」「password1」这类密码字典里全有，撞库时先被试的就是它们。
+ * 用户朋友之间互相传密码很常见，这层检查能挡掉大部分「图省事」。
+ */
+const WEAK_PASSWORDS = new Set([
+  '12345678', '123456789', '1234567890', '87654321', '11111111', '00000000',
+  'password', 'password1', 'passw0rd', 'p@ssw0rd', 'password123',
+  'qwerty123', 'qwertyui', 'abc12345', 'abcd1234', 'a1234567', 'asdf1234',
+  'admin123', 'root1234', 'test1234', 'user1234', 'iloveyou', 'sunshine',
+  'princess', 'football', 'charlie', 'welcome1', 'letmein1', 'monkey12',
+  'dragon12', 'trustno1', 'baseball', 'shadow12', 'superman', 'michael1',
+]);
+
+/** 密码强度校验，返回 null 表示没问题，否则返回一句提示 */
 function checkPassword(pw) {
   const s = String(pw ?? '');
   if (s.length < LOGIN_PW_MIN) return `密码至少 ${LOGIN_PW_MIN} 位`;
   if (s.length > LOGIN_PW_MAX) return `密码最多 ${LOGIN_PW_MAX} 位`;
+  if (WEAK_PASSWORDS.has(s.toLowerCase())) return '这个密码太常见了，换一个难猜的';
+  // 至少含一个字母和一个数字
+  if (!/[a-zA-Z]/.test(s)) return '密码里要有字母';
+  if (!/[0-9]/.test(s)) return '密码里要有数字';
   return null;
+}
+
+/* ================================================================== */
+/* 账号 + 会话                                                        */
+/* ================================================================== */
+
+// 会话有效期：30 天。每次用到就往后延（滑动续期），
+// 天天在用的人不会被莫名其妙踢下线。
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS) || 30 * 24 * 60 * 60 * 1000;
+
+// 账号名规则：3-20 位，字母/数字/下划线/短横线/中文。
+const ACCOUNT_NAME_RE = /^[A-Za-z0-9_\-\u4e00-\u9fa5]{3,20}$/;
+
+// 连续输错密码的容忍次数与锁定时长（逐级加长）
+const ACCOUNT_MAX_FAIL = 5;
+const ACCOUNT_LOCK_MS = [0, 0, 0, 0, 0, 15 * 60 * 1000, 60 * 60 * 1000, 6 * 3600 * 1000];
+
+/**
+ * 账号名归一化：去首尾空格 + 转小写 + 内部空格去掉。
+ *
+ * 「 Xiao Ming 」和「xiaoming」应该是同一个账号 —— 否则用户换个输入法
+ * 空格就登不上。中文不受 toLowerCase 影响。
+ */
+function normalizeAccountName(raw) {
+  return String(raw ?? '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+/** 生成不可预测的会话 token（256 位熵） */
+function newSessionToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+/** sha256 十六进制 —— 会话 token 在库里只存这个 */
+function sha256(s) {
+  return crypto.createHash('sha256').update(String(s)).digest('hex');
+}
+
+/**
+ * 校验会话 token，成功返回 { account, user }，失败返回 null。
+ *
+ * 做了三件事：
+ *   1. 过期会话直接删掉（顺便清理）
+ *   2. 滑动续期 —— 每次用到就往后延 30 天
+ *   3. 绑上当前设备
+ */
+function resolveSession(token, now, clientId) {
+  if (!token) return null;
+  const h = sha256(token);
+  const s = S.getSession.get(h);
+  if (!s) return null;
+
+  if (s.expires_at < now) {
+    S.deleteSession.run(h);
+    return null;
+  }
+
+  const acc = S.findAccountById.get(s.account_id);
+  if (!acc) { S.deleteSession.run(h); return null; }
+
+  const urow = S.getUser.get(acc.user_id);
+  if (!urow) {
+    // 账号还在但身份被删了（理论上不会，因为账号用户受保护）→ 会话作废
+    S.deleteSession.run(h);
+    return null;
+  }
+
+  // 滑动续期
+  S.touchSession.run(now + SESSION_TTL_MS, now, h);
+  if (clientId) S.bindSessionDevice.run(clientId, h);
+
+  return { account: acc, user: urow };
+}
+
+/** 建一个会话，返回明文 token（只在这一刻出现在网络上） */
+function createSession(accountId, clientId, now) {
+  const token = newSessionToken();
+  S.insertSession.run(sha256(token), accountId, clientId || null, now, now + SESSION_TTL_MS, now);
+  return token;
+}
+
+/* ---------- 按 IP 限流（防暴力破解 / 防刷注册） ---------- */
+
+/**
+ * 按 IP 限流（防暴力破解 / 防刷注册）
+ *
+ * 内存里存，进程重启就清空 —— 对付「脚本不停换 IP」也没用，
+ * 但能挡住最常见的「同一个 IP 疯狂试密码」。
+ *
+ * ⚠️ **只统计失败的认证请求**。
+ * 一开始是「所有认证请求都计数」，结果正常用户也有影响：
+ * 密码管理器偶尔填错一次、用户自己手滑输错几次，
+ * 10 分钟内 20 次就把这个 IP 整个封了 —— 后面连正确的密码都登不进去。
+ * 改成只算失败之后，正常使用完全不受影响。
+ *
+ * 真正的大杀器是账号级锁定（fail_count），这里是第一道闸。
+ */
+const ipBuckets = new Map();
+const IP_LIMIT_WINDOW_MS = 10 * 60 * 1000;    // 10 分钟一个窗口
+const IP_LIMIT_MAX = 30;                      // 窗口内最多 30 次**失败**
+
+/** 查一下这个 IP 现在还能不能继续尝试（不计数） */
+function ipAllowed(ip, now) {
+  if (!ip) return true;      // 拿不到 IP 就放过（本地开发）
+  const b = ipBuckets.get(ip);
+  if (!b || b.resetAt < now) return true;
+  return b.count < IP_LIMIT_MAX;
+}
+
+/** 记一次失败 */
+function ipFail(ip, now) {
+  if (!ip) return;
+  const b = ipBuckets.get(ip);
+  if (!b || b.resetAt < now) {
+    ipBuckets.set(ip, { count: 1, resetAt: now + IP_LIMIT_WINDOW_MS });
+    return;
+  }
+  b.count++;
+}
+
+/** 成功了就清零 —— 别让正常用户的历史失误一直挂着 */
+function ipSuccess(ip, now) {
+  if (!ip) return;
+  const b = ipBuckets.get(ip);
+  if (b) ipBuckets.delete(ip);
+}
+
+/** 定时清掉过期的限流桶，别让内存无限涨 */
+function cleanupIpBuckets() {
+  const now = Date.now();
+  for (const [ip, b] of ipBuckets) {
+    if (b.resetAt < now) ipBuckets.delete(ip);
+  }
 }
 
 /* ================================================================== */
@@ -793,6 +1081,64 @@ function cleanupOrphanAvatars() {
 }
 
 /* ================================================================== */
+/* 安全响应头                                                          */
+/* ================================================================== */
+/**
+ * 一组安全响应头 —— 浏览器一收到就按这些规则执行。
+ *
+ * CSP（内容安全策略）是主角：它规定「这个页面只准从自己家里加载东西」。
+ * 就算有人想注入一段恶意脚本（XSS），没有 'unsafe-inline' 也执行不了。
+ *
+ * ⚠️ 这里没写 'unsafe-inline' 是故意的：
+ *   - script-src 'self'  → 页面里的 JS 只能来自本服务器
+ *   - style-src 允许 inline → 因为 app.js 里有动态设置 style 的逻辑
+ *     （设置元素样式属性不算 inline style，CSP 不会拦；
+ *      但 style-src 不写 'unsafe-inline' 的话有些浏览器会连
+ *      element.style.xxx 都拦掉，所以这里留个口子）
+ *
+ * connect-src 要带上 wss: —— WebSocket 连的是自己，但协议不同。
+ */
+const SECURITY_HEADERS = {
+  // 禁止被 iframe 嵌套（防点击劫持）
+  'X-Frame-Options': 'DENY',
+  // 禁止浏览器瞎猜 MIME 类型（防脚本被当 HTML 执行）
+  'X-Content-Type-Options': 'nosniff',
+  // 页面可能被嵌到哪 → 只告诉它「别把 referer 带走」
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  // 关掉一堆用不上的浏览器能力（摄像头、麦克风、地理位置…）
+  'Permissions-Policy': 'geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=()',
+  // 内容安全策略
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self' ws: wss:",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "object-src 'none'",
+  ].join('; '),
+  // 不泄露服务器用的是 Node.js
+  'X-Powered-By': '',
+};
+
+// HSTS：告诉浏览器「以后这个域名只准走 HTTPS」。
+// 只在真正的 HTTPS 连接上发 —— 本地 http 开发时发这个会让浏览器拒绝再走 http。
+// 由 nginx 在 https server 块里加更合适（那是唯一确定是 https 的地方），
+// 这里只在 x-forwarded-proto 表明是 https 时才加，双保险。
+function securityHeadersFor(req) {
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const h = { ...SECURITY_HEADERS };
+  if (proto === 'https') {
+    // max-age 1 年 + includeSubDomains + preload（preload 需要单独申请，先不加）
+    h['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains';
+  }
+  return h;
+}
+
+/* ================================================================== */
 /* 静态资源                                                            */
 /* ================================================================== */
 
@@ -814,6 +1160,9 @@ function serveStatic(req, res) {
     res.writeHead(400).end('Bad Request');
     return;
   }
+
+  // 每个响应都带上安全头（HSTS 只在 https 时加）
+  const sec = securityHeadersFor(req);
 
   // 路由：
   //   /           → 「聊天网页」入口页（点进去就是聊天室）
@@ -840,13 +1189,14 @@ function serveStatic(req, res) {
     const host = String(req.headers.host || '').split(':')[0];
     const localHost = host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
     if (!isLoopback || !localHost) {
-      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8', ...sec });
       res.end(JSON.stringify({ error: 'forbidden' }));
       return;
     }
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
+      ...sec,
     });
     res.end(JSON.stringify({ key: ROOM_KEY }));
     return;
@@ -864,7 +1214,7 @@ function serveStatic(req, res) {
   if (pathname.startsWith('/avatar/')) {
     const m = /^([0-9a-f]{16})\.png$/.exec(pathname.slice('/avatar/'.length));
     if (!m) {
-      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...sec });
       res.end('头像不存在');
       return;
     }
@@ -873,14 +1223,14 @@ function serveStatic(req, res) {
       given = new URL(req.url, 'http://localhost').searchParams.get('k') || '';
     } catch { given = ''; }
     if (!keyMatches(given)) {
-      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...sec });
       res.end('需要房间口令');
       return;
     }
     const avatarPath = path.join(AVATAR_DIR, `${m[1]}.png`);
     fs.readFile(avatarPath, (err, data) => {
       if (err) {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...sec });
         res.end('头像不存在');
         return;
       }
@@ -888,6 +1238,7 @@ function serveStatic(req, res) {
         'Content-Type': 'image/png',
         // 文件名带随机 token，内容变了就是新 URL —— 可以放心长期缓存
         'Cache-Control': 'private, max-age=31536000, immutable',
+        ...sec,
       });
       res.end(data);
     });
@@ -909,6 +1260,7 @@ function serveStatic(req, res) {
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
       'Cache-Control': 'no-cache',
+      ...SECURITY_HEADERS,
     });
     res.end(data);
   });
@@ -980,9 +1332,24 @@ wss.on('connection', (ws, req) => {
 
   /* ---------- 身份解析：优先复用这台设备上次的身份 ---------- */
   let clientId = '';
+  let sessionToken = '';
   try {
-    clientId = String(new URL(req.url, 'http://localhost').searchParams.get('cid') || '').slice(0, 64);
-  } catch { clientId = ''; }
+    const q = new URL(req.url, 'http://localhost').searchParams;
+    clientId = String(q.get('cid') || '').slice(0, 64);
+    sessionToken = String(q.get('st') || '').slice(0, 128);
+  } catch { clientId = ''; sessionToken = ''; }
+
+  /* ---------- 真实客户端 IP（给限流用） ---------- */
+  //
+  // ⚠️ 反向代理后面 req.socket.remoteAddress 永远是 nginx 的 127.0.0.1，
+  // 所以必须取 X-Forwarded-For 里的第一个（最靠近客户端的那个）。
+  // 拿不到该头 = 直连本机（本地开发），这时才看 remoteAddress。
+  let clientIp = '';
+  try {
+    const fwd = String(req.headers['x-forwarded-for'] || '');
+    clientIp = (fwd ? fwd.split(',')[0] : String(req.socket.remoteAddress || '')).trim();
+  } catch { clientIp = ''; }
+  ws.clientIp = clientIp;
 
   // 先查设备绑定表（一台设备只属于一个人）
   let known = null;
@@ -1029,6 +1396,39 @@ wss.on('connection', (ws, req) => {
     }
   }
 
+  /* ---------- 账号会话：带着 token 连进来 → 直接认回身份 ---------- */
+  //
+  // 客户端登入成功后把 session token 存 localStorage，之后每次连接都带上。
+  // 这样「换设备 + 登入」之后，刷新页面不用再输密码，
+  // 而且进来就是原来的名字、头像、历史消息。
+  //
+  // 优先级：**会话 > 设备绑定**。
+  // 场景：设备上先登入了账号 A，后来又在同一台设备登入了账号 B ——
+  // 设备绑定指向 B，但会话也指向 B，一致。
+  // 反过来（设备绑的是临时身份，会话是账号）→ 账号优先，这正是我们要的。
+  let session = null;
+  if (sessionToken) {
+    session = resolveSession(sessionToken, now, clientId);
+    if (session && session.user.id !== user.id) {
+      // 会话指向的身份和当前解析出来的不是同一个 → 换成会话那个
+      const target = session.user;
+      // 当前这个临时身份（一条消息都没发过的）直接清掉，别留僵尸行
+      try { S.setClient.run(null, now, user.id); } catch { /* ignore */ }
+      if (S.countMsgs.get(user.id).c === 0) {
+        try { S.deleteUser.run(user.id); } catch { /* ignore */ }
+      }
+      user = { id: target.id, name: target.name, color: target.color, avatar: target.avatar || '' };
+      user.name = uniqueName(user.name, user.id);
+      try { S.renameUser.run(user.name, user.color, now, user.id); } catch { /* ignore */ }
+      if (clientId) {
+        try { S.clearClientOther.run(clientId, user.id); } catch { /* ignore */ }
+        try { S.setClient.run(clientId, now, user.id); } catch { /* ignore */ }
+        S.setDevice.run(clientId, user.id, now);
+      }
+    }
+  }
+  ws.sessionHash = session ? sha256(sessionToken) : '';
+
   // 同一 client_id 重新连接（刷新页面）→ 顶掉旧连接，且不广播 leave
   if (clientId) {
     const old = cidClients.get(clientId);
@@ -1053,6 +1453,7 @@ wss.on('connection', (ws, req) => {
   const rows = S.latest.all(PAGE_SIZE);
   const total = S.countAll.get().c;
   const meRow = S.getUserLogin.get(user.id);
+  const myAccount = S.findAccountByUser.get(user.id);
   send(ws, {
     t: 'init',
     self: publicUser(user),
@@ -1067,6 +1468,15 @@ wss.on('connection', (ws, req) => {
     //   hasAny → 房间里有人设过密码（决定要不要显示「登录已有身份」入口）
     loginSet: !!(meRow && meRow.login_hash),
     hasLogin: S.countLoginUsers.get().c > 0,
+    // 账号状态：
+    //   registered → 我已经注册了账号
+    //   username   → 我的账号名
+    //   hasAny     → 房间里有人注册了账号（决定要不要显示「登录已有账号」入口）
+    registered: !!myAccount,
+    username: myAccount ? myAccount.display_name : '',
+    hasAnyAccount: S.countAccounts.get().c > 0,
+    // 会话是否还有效（带 token 连进来时）
+    sessionOk: !!session,
   });
 
   broadcast({ t: 'join', user: publicUser(user) }, ws);
@@ -1331,6 +1741,238 @@ wss.on('connection', (ws, req) => {
         });
         break;
       }
+
+      /* ================= 账号（注册 / 登入） ================= */
+
+      /* ---------- 查询账号状态 ---------- */
+      case 'accountInfo': {
+        const acc = S.findAccountByUser.get(user.id);
+        send(ws, {
+          t: 'accountInfo',
+          registered: !!acc,
+          username: acc ? acc.display_name : '',
+          hasAny: S.countAccounts.get().c > 0,
+        });
+        break;
+      }
+
+      /* ---------- 注册账号 ---------- */
+      //
+      // 注册时**绑定当前这个身份**（昵称、头像、历史消息全都保留）——
+      // 不是新建一个空身份。用户在房间里用着「小明」，注册一下，
+      // 从此这个身份就能在任何设备上用账号密码认回来。
+      case 'accountRegister': {
+        const now = Date.now();
+        const rawName = String(data.username ?? '').trim().slice(0, 20);
+        const pw = String(data.password ?? '');
+        const pw2 = String(data.password2 ?? '');
+
+        if (!ipAllowed(ws.clientIp, now)) {
+          send(ws, { t: 'accountAck', ok: false, msg: '尝试次数太多，先歇一会儿再试' });
+          break;
+        }
+
+        if (!ACCOUNT_NAME_RE.test(rawName)) {
+          send(ws, { t: 'accountAck', ok: false, msg: '账号名要 3-20 位，字母、数字、下划线或中文' });
+          break;
+        }
+        const nameKey = normalizeAccountName(rawName);
+        if (!nameKey) {
+          send(ws, { t: 'accountAck', ok: false, msg: '账号名不能只有空格' });
+          break;
+        }
+        if (S.findAccount.get(nameKey)) {
+          send(ws, { t: 'accountAck', ok: false, msg: '这个账号名已经被占了' });
+          break;
+        }
+        if (S.findAccountByUser.get(user.id)) {
+          send(ws, { t: 'accountAck', ok: false, msg: '你已经注册过账号了' });
+          break;
+        }
+        const bad = checkPassword(pw);
+        if (bad) { send(ws, { t: 'accountAck', ok: false, msg: bad }); break; }
+        if (pw !== pw2) { send(ws, { t: 'accountAck', ok: false, msg: '两次输入的密码不一样' }); break; }
+
+        const { salt, hash } = hashPassword(pw);
+        const accId = crypto.randomUUID();
+        try {
+          S.insertAccount.run(accId, nameKey, rawName, hash, salt, user.id, now);
+        } catch (err) {
+          const m = String((err && err.message) || err);
+          if (/UNIQUE|constraint/i.test(m)) {
+            send(ws, { t: 'accountAck', ok: false, msg: '这个账号名已经被占了' });
+          } else {
+            send(ws, { t: 'accountAck', ok: false, msg: '注册失败，稍后再试' });
+          }
+          break;
+        }
+
+        const token = createSession(accId, ws.clientId, now);
+        send(ws, {
+          t: 'accountAck',
+          ok: true,
+          msg: '账号已创建',
+          username: rawName,
+          token,
+          user: publicUser(user),
+        });
+        break;
+      }
+
+      /* ---------- 登入账号 ---------- */
+      case 'accountLogin': {
+        const now = Date.now();
+        const nameKey = normalizeAccountName(data.username ?? '');
+        const pw = String(data.password ?? '');
+
+        if (!ipAllowed(ws.clientIp, now)) {
+          send(ws, { t: 'accountAck', ok: false, msg: '尝试次数太多，先歇一会儿再试' });
+          break;
+        }
+        if (!nameKey || !pw) {
+          send(ws, { t: 'accountAck', ok: false, msg: '请填写账号和密码' });
+          break;
+        }
+
+        const acc = S.findAccount.get(nameKey);
+
+        // 账号被锁了（连续输错太多次）
+        if (acc && acc.locked_until > now) {
+          const mins = Math.ceil((acc.locked_until - now) / 60000);
+          send(ws, { t: 'accountAck', ok: false, msg: `密码错太多次，${mins} 分钟后再试` });
+          break;
+        }
+
+        // 账号不存在 / 密码错 —— 给同一句话，不泄露「这个账号存在」
+        // （否则可以拿账号名列表来试探谁注册过）
+        if (!acc || !verifyPassword(pw, acc.pass_hash, acc.pass_salt)) {
+          ipFail(ws.clientIp, now);
+          if (acc) {
+            // 失败计数 + 逐级锁定
+            const fails = acc.fail_count + 1;
+            const lockIdx = Math.min(fails, ACCOUNT_LOCK_MS.length - 1);
+            const until = fails >= ACCOUNT_MAX_FAIL ? now + ACCOUNT_LOCK_MS[lockIdx] : 0;
+            S.bumpAccountFail.run(until, acc.id);
+            // ⚠️ 达到阈值的那一次就直接告诉用户「已锁定」，
+            //    别让人再输第 6、7 次才知道自己被挡了。
+            if (until > 0) {
+              const mins = Math.ceil((until - now) / 60000);
+              send(ws, { t: 'accountAck', ok: false, msg: `密码错太多次，账号已锁定，${mins} 分钟后再试` });
+              break;
+            }
+          }
+          send(ws, { t: 'accountAck', ok: false, msg: '账号或密码不对' });
+          break;
+        }
+
+        // 密码对上了
+        ipSuccess(ws.clientIp, now);
+        S.resetAccountFail.run(acc.id);
+        S.touchAccountLogin.run(now, acc.id);
+
+        const targetId = acc.user_id;
+        const row = S.getUser.get(targetId);
+        if (!row) {
+          send(ws, { t: 'accountAck', ok: false, msg: '这个账号绑定的身份已经不在了' });
+          break;
+        }
+
+        const token = createSession(acc.id, ws.clientId, now);
+
+        if (row.id === user.id) {
+          // 已经是这个身份 —— 不用换，直接发 token
+          send(ws, {
+            t: 'accountAck',
+            ok: true,
+            msg: '登录成功',
+            username: acc.display_name,
+            token,
+            user: publicUser(user),
+            unchanged: true,
+          });
+          break;
+        }
+
+        const oldUser = user;
+
+        // 1) 临时身份摘掉 client_id 并按需删掉（一条消息都没发过的直接清掉）
+        try { S.setClient.run(null, now, oldUser.id); } catch { /* ignore */ }
+        if (S.countMsgs.get(oldUser.id).c === 0) {
+          try { S.deleteUser.run(oldUser.id); } catch { /* ignore */ }
+        }
+
+        // 2) 这台设备绑到这个账号 → 以后刷新就是「我」
+        if (ws.clientId) {
+          try { S.setDevice.run(ws.clientId, row.id, now); } catch { /* ignore */ }
+        }
+
+        // 3) 切换身份
+        user = { id: row.id, name: row.name, color: row.color, avatar: row.avatar || '' };
+        ws.user = user;
+        clients.set(ws, user);
+
+        // 4) 告诉其他人：临时昵称走了，「我」回来了
+        broadcast({ t: 'identity', user: publicUser(user), prev: publicUser(oldUser) }, ws);
+
+        // 5) 回执 + 最新一页历史
+        const rows2 = S.latest.all(PAGE_SIZE);
+        const total2 = S.countAll.get().c;
+        send(ws, {
+          t: 'accountAck',
+          ok: true,
+          msg: '登录成功',
+          username: acc.display_name,
+          token,
+          user: publicUser(user),
+          prev: publicUser(oldUser),
+          history: rows2.reverse().map(toMessage),
+          hasMore: total2 > rows2.length,
+        });
+        break;
+      }
+
+      /* ---------- 退出登录（作废本机会话） ---------- */
+      case 'accountLogout': {
+        if (ws.sessionHash) {
+          S.deleteSession.run(ws.sessionHash);
+          ws.sessionHash = '';
+        }
+        send(ws, { t: 'accountAck', ok: true, msg: '已退出登录', loggedOut: true });
+        break;
+      }
+
+      /* ---------- 修改账号密码 ---------- */
+      case 'accountChangePw': {
+        const now = Date.now();
+        const acc = S.findAccountByUser.get(user.id);
+        if (!acc) {
+          send(ws, { t: 'accountAck', ok: false, msg: '还没有注册账号' });
+          break;
+        }
+        const oldPw = String(data.oldPw ?? '');
+        const newPw = String(data.newPw ?? '');
+        if (!verifyPassword(oldPw, acc.pass_hash, acc.pass_salt)) {
+          send(ws, { t: 'accountAck', ok: false, msg: '原密码不对' });
+          break;
+        }
+        const bad = checkPassword(newPw);
+        if (bad) { send(ws, { t: 'accountAck', ok: false, msg: bad }); break; }
+
+        const { salt, hash } = hashPassword(newPw);
+        S.updateAccountPw.run(hash, salt, acc.id);
+        // 改完密码 → 这个账号的所有会话作废，逼其它设备重新登入
+        S.deleteAccountSessions.run(acc.id);
+        const token = createSession(acc.id, ws.clientId, now);
+        send(ws, {
+          t: 'accountAck',
+          ok: true,
+          msg: '密码已修改，其它设备需要重新登录',
+          username: acc.display_name,
+          token,
+          user: publicUser(user),
+        });
+        break;
+      }
     }
   });
 
@@ -1375,11 +2017,24 @@ const heartbeat = setInterval(() => {
 }, 30000);
 
 const cleaner = setInterval(cleanupOldData, CLEANUP_INTERVAL_MS);
+
+// 会话清理：过期会话删掉，限流桶清空
+const sessionCleaner = setInterval(() => {
+  const now = Date.now();
+  const removed = S.deleteExpiredSessions.run(now).changes;
+  cleanupIpBuckets();
+  if (removed) console.log(`[cleanup] 清理过期会话 ${removed} 个`);
+}, 60 * 60 * 1000);
+
 migrateUniqueNames();   // 昵称全局唯一（在线 + 历史一起算）
 migrateColors();
 cleanupOldData();
 
-wss.on('close', () => { clearInterval(heartbeat); clearInterval(cleaner); });
+wss.on('close', () => {
+  clearInterval(heartbeat);
+  clearInterval(cleaner);
+  clearInterval(sessionCleaner);
+});
 
 server.listen(PORT, HOST, () => {
   console.log(`聊天室已启动 → http://localhost:${PORT}`);

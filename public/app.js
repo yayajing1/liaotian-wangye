@@ -41,6 +41,15 @@
     // 登录身份
     loginModal: $('loginModal'), loginName: $('loginName'), loginPw: $('loginPw'),
     loginErr: $('loginErr'), loginOk: $('loginOk'), loginCancel: $('loginCancel'),
+    // 账号（注册 / 登入）
+    accountBtn: $('accountBtn'), accountBtnTxt: $('accountBtnTxt'),
+    accountModal: $('accountModal'), accountDesc: $('accountDesc'),
+    accLoginName: $('accLoginName'), accLoginPw: $('accLoginPw'), accLoginErr: $('accLoginErr'),
+    accLoginBtn: $('accLoginBtn'),
+    accRegName: $('accRegName'), accRegPw: $('accRegPw'), accRegPw2: $('accRegPw2'),
+    accRegErr: $('accRegErr'), accRegBtn: $('accRegBtn'),
+    accState: $('accState'), accStateName: $('accStateName'), accLogoutBtn: $('accLogoutBtn'),
+    accCloseBtn: $('accCloseBtn'),
   };
 
   const RECALL_WINDOW = 2 * 60 * 1000;    // 撤回时限
@@ -91,6 +100,9 @@
     pickedImageData: '',   // 选中的图片（dataURL），待上传
     loginSet: false,   // 我有没有设置个人登录密码
     hasLogin: false,   // 房间里有没有人设置过个人登录密码
+    registered: false, // 我有没有注册账号
+    username: '',      // 我的账号名
+    hasAnyAccount: false, // 房间里有没有人注册了账号
   };
 
   /* ---------------- 工具 ---------------- */
@@ -113,6 +125,31 @@
       try { localStorage.setItem(CID_KEY, cid); } catch { /* ignore */ }
     }
     return cid;
+  }
+
+  /* ---------------- 账号会话 token ---------------- */
+
+  const TOKEN_STORE = 'chat_account_token';
+
+  /**
+   * 读会话 token
+   *
+   * 登入成功后服务端会发一个 token，存 localStorage。
+   * 之后每次连接都带上它 → 服务端直接认回身份，不用再输密码。
+   *
+   * 存 localStorage 而不是 sessionStorage：换标签页、关掉重开都还在。
+   * 风险是「共用电脑」能拿到 —— 但这台是私人服务器，房间口令本身也是
+   * 靠链接传的，威胁模型一样，可接受。
+   */
+  function getToken() {
+    try { return localStorage.getItem(TOKEN_STORE) || ''; } catch { return ''; }
+  }
+
+  function setToken(tok) {
+    try {
+      if (tok) localStorage.setItem(TOKEN_STORE, tok);
+      else localStorage.removeItem(TOKEN_STORE);
+    } catch { /* ignore */ }
   }
 
   /* ---------------- 房间口令 ---------------- */
@@ -334,7 +371,9 @@
     // 如果 state.key 是空的，头像会全部 403 变成空白圆。
     if (!state.key) state.key = getRoomKey();
     const key = encodeURIComponent(state.key || '');
-    const ws = new WebSocket(`${proto}//${location.host}/ws?cid=${cid}&key=${key}`);
+    // 会话 token：登入过就带上 → 服务端直接认回身份（名字/头像/历史全回来）
+    const tok = encodeURIComponent(getToken() || '');
+    const ws = new WebSocket(`${proto}//${location.host}/ws?cid=${cid}&key=${key}&st=${tok}`);
     state.ws = ws;
 
     ws.onopen = () => {
@@ -466,8 +505,18 @@
         // 个人登录密码状态
         state.loginSet = !!data.loginSet;
         state.hasLogin = !!data.hasLogin;
+        // 账号状态
+        state.registered = !!data.registered;
+        state.username = data.username || '';
+        state.hasAnyAccount = !!data.hasAnyAccount;
+        // 服务端说会话无效（token 过期 / 被踢）→ 把本机的 token 扔掉，
+        // 免得一直带着一个废 token 重连
+        if (data.sessionOk === false && getToken()) {
+          setToken('');
+        }
         renderMe();
         renderUsers();
+        renderAccountBtn();
         renderMessages({ stickBottom: true });
         el.moreWrap.hidden = !state.hasMore;
         break;
@@ -644,6 +693,74 @@
         state.users.set(data.user.id, data.user);
         renderUsers();
         pushSystem(`${data.user.name} 登录回来了`);
+        break;
+      }
+
+      /* ================= 账号（注册 / 登入） ================= */
+
+      case 'accountInfo': {
+        state.registered = !!data.registered;
+        state.username = data.username || '';
+        state.hasAnyAccount = !!data.hasAny;
+        renderAccountBtn();
+        break;
+      }
+
+      case 'accountAck': {
+        // 注册 / 登入 / 退出登录 的回执
+        el.accLoginBtn.disabled = false;
+        el.accLoginBtn.textContent = '登入';
+        el.accRegBtn.disabled = false;
+        el.accRegBtn.textContent = '注册';
+
+        if (!data.ok) {
+          // 错误显示在对应的框里（登入错 → 上面，登入/注册错 → 下面）
+          const msg = data.msg || '操作没成功，再试一次。';
+          if (!el.accLoginErr.hidden || el.accLoginName.value) {
+            el.accLoginErr.hidden = false;
+            el.accLoginErr.textContent = msg;
+          } else {
+            el.accRegErr.hidden = false;
+            el.accRegErr.textContent = msg;
+          }
+          return;
+        }
+
+        // 成功
+        el.accLoginErr.hidden = true;
+        el.accRegErr.hidden = true;
+        if (data.token) setToken(data.token);
+        if (data.username) state.username = data.username;
+        if (data.loggedOut) {
+          state.registered = false;
+          state.username = '';
+          setToken('');
+          closeAccount();
+          renderAccountBtn();
+          pushSystem('已退出登录');
+          break;
+        }
+        state.registered = true;
+
+        // 身份换了（从别的设备登入）→ 更新自己 + 历史
+        if (data.user) {
+          state.self = data.user;
+          state.users.set(data.user.id, data.user);
+          if (data.prev) state.users.delete(data.prev.id);
+        }
+        if (Array.isArray(data.history)) {
+          state.messages = data.history.slice();
+          state.byId = new Map(state.messages.map((m) => [m.id, m]));
+          state.hasMore = !!data.hasMore;
+          el.moreWrap.hidden = !state.hasMore;
+        }
+
+        renderMe();
+        renderUsers();
+        renderMessages({ stickBottom: true });
+        renderAccountBtn();
+        closeAccount();
+        pushSystem(data.msg || '登录成功');
         break;
       }
     }
@@ -1196,6 +1313,137 @@
     el.loginOk.textContent = '登录中…';
   }
 
+  /* ---------------- 账号：注册 / 登入 ---------------- */
+
+  /**
+   * 打开账号白框
+   *
+   * 已经登录过 → 只显示「已登录」状态条和「退出登录」；
+   * 没登录 → 显示上面的「登入」框和下面的「注册」框（两个按钮同时可见）。
+   */
+  function openAccount() {
+    el.accLoginErr.hidden = true;
+    el.accRegErr.hidden = true;
+    el.accLoginPw.value = '';
+    el.accRegPw.value = '';
+    el.accRegPw2.value = '';
+
+    if (state.registered) {
+      el.accState.hidden = false;
+      el.accStateName.textContent = `已登录：${state.username || '（未知账号）'}`;
+      el.accountDesc.textContent = '换个设备时，用这个账号就能把名字、头像和聊天记录找回来。';
+    } else {
+      el.accState.hidden = true;
+      el.accountDesc.textContent = '登录后，这个名字、头像和聊天记录在任何设备上都能找回来。';
+    }
+    el.accountModal.hidden = false;
+    // 问一下服务端最新状态（别人可能刚注册过）
+    wsSend({ t: 'accountInfo' });
+  }
+
+  function closeAccount() {
+    el.accountModal.hidden = true;
+    // 清掉明文密码
+    el.accLoginPw.value = '';
+    el.accRegPw.value = '';
+    el.accRegPw2.value = '';
+  }
+
+  /** 登入 */
+  function submitAccountLogin() {
+    const name = String(el.accLoginName.value || '').trim();
+    const pw = String(el.accLoginPw.value || '');
+    if (!name) {
+      el.accLoginErr.hidden = false;
+      el.accLoginErr.textContent = '请填写账号名。';
+      return;
+    }
+    if (!pw) {
+      el.accLoginErr.hidden = false;
+      el.accLoginErr.textContent = '请填写密码。';
+      return;
+    }
+    el.accLoginErr.hidden = true;
+    if (!wsSend({ t: 'accountLogin', username: name, password: pw })) {
+      el.accLoginErr.hidden = false;
+      el.accLoginErr.textContent = '还没连上服务器，稍等一下再试。';
+      return;
+    }
+    el.accLoginBtn.disabled = true;
+    el.accLoginBtn.textContent = '登入中…';
+  }
+
+  /** 注册 */
+  function submitAccountRegister() {
+    const name = String(el.accRegName.value || '').trim();
+    const pw = String(el.accRegPw.value || '');
+    const pw2 = String(el.accRegPw2.value || '');
+    if (!name) {
+      el.accRegErr.hidden = false;
+      el.accRegErr.textContent = '请填写账号名。';
+      return;
+    }
+    if (name.length < 3 || name.length > 20) {
+      el.accRegErr.hidden = false;
+      el.accRegErr.textContent = '账号名要 3-20 位。';
+      return;
+    }
+    // 前端先拦一道，别把明显不合格的密码发到网络上
+    // （服务端还会再验一遍，这里只是为了即时反馈）
+    if (pw.length < 8) {
+      el.accRegErr.hidden = false;
+      el.accRegErr.textContent = '密码至少 8 位。';
+      return;
+    }
+    if (!/[a-zA-Z]/.test(pw) || !/[0-9]/.test(pw)) {
+      el.accRegErr.hidden = false;
+      el.accRegErr.textContent = '密码里要有字母，也要有数字。';
+      return;
+    }
+    if (!pw) {
+      el.accRegErr.hidden = false;
+      el.accRegErr.textContent = '请填写密码。';
+      return;
+    }
+    if (pw !== pw2) {
+      el.accRegErr.hidden = false;
+      el.accRegErr.textContent = '两次输入的密码不一样，再输一次。';
+      return;
+    }
+    el.accRegErr.hidden = true;
+    if (!wsSend({ t: 'accountRegister', username: name, password: pw, password2: pw2 })) {
+      el.accRegErr.hidden = false;
+      el.accRegErr.textContent = '还没连上服务器，稍等一下再试。';
+      return;
+    }
+    el.accRegBtn.disabled = true;
+    el.accRegBtn.textContent = '注册中…';
+  }
+
+  /** 退出登录 */
+  function submitAccountLogout() {
+    if (!wsSend({ t: 'accountLogout' })) {
+      setToken('');       // 至少把本机的 token 清了
+      state.registered = false;
+      state.username = '';
+      renderAccountBtn();
+      closeAccount();
+      return;
+    }
+  }
+
+  /** 侧栏那个按钮的文案：登录前「注册账号」，登录后显示账号名 */
+  function renderAccountBtn() {
+    if (!el.accountBtnTxt) return;
+    if (state.registered) {
+      el.accountBtnTxt.textContent = state.username || '已登录';
+      el.accountBtn.title = `已登录：${state.username || ''}（点击查看）`;
+    } else {
+      el.accountBtnTxt.textContent = state.hasAnyAccount ? '登录账号' : '注册账号';
+      el.accountBtn.title = '注册 / 登录账号';
+    }
+  }
+
   /* ---------------- 事件绑定 ---------------- */
 
   // 被别的连接顶替时，点连接状态可以「换新身份重新进入」
@@ -1282,6 +1530,28 @@
     if (e.key === 'Enter') { e.preventDefault(); el.loginPw.focus(); }
   });
 
+  /* ---------------- 账号：注册 / 登入 ---------------- */
+
+  el.accountBtn.addEventListener('click', openAccount);
+  el.accCloseBtn.addEventListener('click', closeAccount);
+  el.accLoginBtn.addEventListener('click', submitAccountLogin);
+  el.accRegBtn.addEventListener('click', submitAccountRegister);
+  el.accLogoutBtn.addEventListener('click', submitAccountLogout);
+
+  // 回车直接提交（手机上省一次点按）
+  el.accLoginPw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitAccountLogin(); }
+  });
+  el.accLoginName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); el.accLoginPw.focus(); }
+  });
+  el.accRegPw2.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitAccountRegister(); }
+  });
+  el.accRegPw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); el.accRegPw2.focus(); }
+  });
+
   /* ---------------- 口令弹窗 ---------------- */
 
   el.keyInput.addEventListener('input', updateKeyLen);
@@ -1318,6 +1588,7 @@
     if (e.key !== 'Escape') return;
     if (!el.avatarConfirm.hidden) { closeAvatarConfirm(); return; }
     if (!el.avatarModal.hidden) { closeAvatarPicker(); return; }
+    if (!el.accountModal.hidden) { closeAccount(); return; }
     if (!el.loginModal.hidden) { closeLogin(); return; }
     if (!el.settingsModal.hidden) { closeSettings(); return; }
     if (!el.keyModal.hidden) {
@@ -1391,6 +1662,7 @@
   updateTitle();
   syncViewportHeight();
   syncPlaceholder();
+  renderAccountBtn();
 
   // 先把口令准备好再连：
   //   链接里带了   → 直接用（朋友点分享链接就是这条路）
@@ -1423,5 +1695,7 @@
   window.ChatApp = {
     state, handle, renderMessages, pushSystem, setReplyTo,
     openSettings, closeSettings, showPwView, openLogin, closeLogin,
+    openAccount, closeAccount, renderAccountBtn, submitAccountLogin, submitAccountRegister,
+    getToken, setToken,
   };
 })();
