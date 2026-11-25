@@ -6,6 +6,29 @@
 
 ---
 
+## 快速开始
+
+**已经有服务器？** 三条命令搞定，详见[方式 C](#方式-c云服务器最正规推荐长期使用)：
+
+```bash
+mkdir -p /opt/chat-room && cd /opt/chat-room
+git clone --depth 1 https://github.com/yayajing1/liaotian-wangye.git app && cd app
+bash deploy/deploy.sh && bash deploy/https-setup.sh
+```
+
+**本地先试试？**
+
+```bash
+npm install && npm start
+```
+
+然后打开 <http://localhost:8000>。
+
+**怎么让朋友进来？** 见[「让朋友进来」](#二让朋友进来三种方式按需选)。
+核心就一句话：**必须是公网地址，`localhost` 朋友永远打不开**。
+
+---
+
 ## 功能特性
 
 | 能力 | 说明 |
@@ -51,10 +74,18 @@ chat-room/
 ├── demo/
 │   └── index.html         # 独立版入口页（双击即跳到本机聊天室）
 ├── deploy/
-│   └── 生产部署.md        # 云服务器完整部署步骤（systemd + Nginx + TLS + 备份）
-│   ├── 云服务器部署指南.md  # 新手向：买机器 → 打包 → 部署 → 验证 全流程
 │   ├── deploy.sh          # 一键部署脚本（装依赖 + systemd + 自检）
-│   └── pack.sh            # 本地打包脚本 → chat-room.tar.gz
+│   ├── https-setup.sh     # HTTPS 装配（Nginx + Let's Encrypt，支持 IP 证书/域名证书）
+│   ├── verify.sh          # 部署体检脚本（服务/证书/端口/续期 六项自检）
+│   ├── grant-ssh.sh       # SSH 授权脚本（一次性，给部署助手直连用）
+│   ├── pack.sh            # 本地打包脚本 → chat-room.tar.gz
+│   ├── backup.sh          # 数据备份/迁移（SQLite 一致性快照）
+│   ├── 云服务器部署指南.md  # 新手向：买机器 → 部署 → 验证 全流程
+│   ├── HTTPS配置.md        # HTTPS 三方案对比 + 故障排查
+│   ├── 域名绑定.md         # 自定义域名绑定全流程
+│   ├── 数据存储.md         # 数据存储机制 + 备份迁移
+│   ├── 生产部署.md         # systemd + Nginx + TLS + 备份（进阶）
+│   └── GitHub上传清单.md    # 本项目上传 GitHub 的操作清单
 ├── test/
 │   ├── multi-client-test.js    # 多客户端协议层自测（26 项）
 │   ├── browser-render-test.js  # 真实浏览器渲染自测（CDP 驱动 Edge）
@@ -149,9 +180,9 @@ http://192.168.1.23:8000
 
 | 方式 | 朋友访问的地址 | 需要什么 | 适合 |
 |---|---|---|---|
-| **A. 本机穿透**（最快，5 分钟搞定） | `https://xxx.trycloudflare.com` | 无，只需本机能上网 | 先试试效果、临时用 |
-| **B. 家庭宽带直连** | `http://<你的公网IP>:8000` | 公网 IP、路由器端口映射 | 长期用但不想买服务器 |
-| **C. 云服务器**（最正规） | `http://<服务器IP>:8000` 或 `https://chat.example.com` | 一台云主机（域名可选） | 长期稳定使用 |
+| **C. 云服务器**（最正规）⭐ | `https://<服务器IP>/chat#key=xxx` | 一台云主机（域名可选） | **长期稳定使用** |
+| A. 本机穿透（最快，5 分钟） | `https://xxx.trycloudflare.com` | 无，只需本机能上网 | 先试试效果、临时用 |
+| B. 家庭宽带直连 | `http://<你的公网IP>:8000` | 公网 IP、路由器端口映射 | 长期用但不想买服务器 |
 
 三种方式**用的是同一套代码**，切换方式不用改任何业务逻辑。
 
@@ -267,30 +298,77 @@ New-NetFirewallRule -DisplayName "Node Chat 8000" -Direction Inbound -Protocol T
 
 需要一台公网云主机（阿里云/腾讯云/etc.）。**新手从
 [`deploy/云服务器部署指南.md`](deploy/云服务器部署指南.md) 开始** —— 里面有完整的
-买服务器 → 打包 → 上传 → 一键部署 → 放行端口 → 验证的全流程，
-外加地域选择（内地要备案 / 香港免备案）的决策说明。
+买服务器 → 部署 → 放行端口 → 验证的全流程，
+外加地域选择的决策说明（**内地服务器要备案，境外/港澳台服务器免备案**）。
 
-最快路径是三步：
+#### 部署后的两种访问形态
+
+| 形态 | 地址 | 说明 |
+|---|---|---|
+| **IP + HTTPS**（推荐） | `https://<服务器IP>/chat#key=xxx` | 地址栏有小锁，聊天走 `wss://` |
+| IP + HTTP（最简） | `http://<服务器IP>:8000/chat#key=xxx` | 不配证书也能用，但明文传输 |
+
+> 💡 **没有域名也能有 HTTPS**：Let's Encrypt 从 2026 年 1 月起支持给
+> **IP 地址**签发证书（有效期约 6 天，需自动续期，脚本已配好 cron + systemd 双保险）。
+> 详见 [`deploy/HTTPS配置.md`](deploy/HTTPS配置.md)。
+>
+> 有域名的话证书有效期是 **90 天**，续期频率差 30 倍，更省心。
+> 详见 [`deploy/域名绑定.md`](deploy/域名绑定.md)。
+
+最快路径是三步（**不用传任何文件，直接从 GitHub 拉代码**）：
 
 ```bash
-# 1. 本地打包
-bash deploy/pack.sh
-# 2. 上传（换成你的 IP）
-scp -P 22 deploy/chat-room.tar.gz root@你的IP:/root/
-# 3. 登录服务器后执行
-ssh root@你的IP
-mkdir -p /opt/chat-room && tar -xzf /root/chat-room.tar.gz -C /opt/chat-room
-cd /opt/chat-room && bash deploy/deploy.sh
+# 1. 服务器上拉代码
+mkdir -p /opt/chat-room && cd /opt/chat-room
+git clone --depth 1 https://github.com/yayajing1/liaotian-wangye.git app
+cd app
+
+# 2. 一键部署（装 Node / 依赖 / 建用户 / 注册 systemd / 自检）
+bash deploy/deploy.sh
+
+# 3. 配 HTTPS（签 Let's Encrypt 证书，地址栏有小锁，聊天走 wss）
+bash deploy/https-setup.sh
 ```
+
+跑完终端会打印**带口令的访问链接**，直接发给朋友即可：
+
+```
+https://<服务器IP>/chat#key=xxxxxxxxxxxx
+```
+
+> 💡 **为什么不用 scp 传包？** 代码已经在 GitHub 上，服务器能直接 clone，
+> 省掉「本地打包 → 上传 → 解压」三个环节，也不怕传漏文件。
+>
+> 如果服务器上没装 git，`deploy.sh` 会自动装。
+> 如果 clone 因为网络原因失败，脚本会自动降级为下载压缩包。
 
 脚本会自动装 Node.js（不够 22 就从 npmmirror 下）、装依赖、建 `chatroom` 用户、
 注册 systemd 服务（开机自启 + 崩溃自动重启），最后打印访问地址和房间口令。
 
 > ⚠️ **别忘了在云控制台的防火墙放行端口** —— 这是「服务器上跑得好好的但外面打不开」
-> 最常见的原因。
+> 最常见的原因。走 HTTPS 的话放行 **80**（签证书要用）和 **443**（HTTPS 入口）。
 
-有域名和备案之后，再补 Nginx + HTTPS（`wss://`），见
-**[`deploy/生产部署.md`](deploy/生产部署.md)**。
+#### 部署完成后跑一次体检
+
+```bash
+cd /opt/chat-room/app
+bash deploy/verify.sh
+```
+
+会一次性检查六项：服务进程、Node 监听地址、Nginx 与证书、
+本机功能自测（含口令门禁）、证书续期任务、公网连通性。
+
+**期望输出**：
+
+```
+✓ 8000 只监听 127.0.0.1 —— 已收回本机，公网打不通 ✓
+✓ 443 在监听 ✓
+✓ 证书签发对象是 IP：IP Address:1.2.3.4
+✓ HTTPS 首页返回 200 ✓
+✓ WebSocket 升级正常，且口令门禁生效（bad_key）✓
+✓ 公网 HTTPS 通（200）✓
+✓ 8000 公网已关闭（连不上）✓ —— 这正是想要的结果
+```
 
 核心要点：
 
