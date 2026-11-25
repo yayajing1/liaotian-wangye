@@ -25,6 +25,22 @@
     avatarConfirm: $('avatarConfirm'), avatarPreview: $('avatarPreview'),
     avatarPreviewName: $('avatarPreviewName'), avatarErr: $('avatarErr'),
     avatarConfirmOk: $('avatarConfirmOk'), avatarConfirmCancel: $('avatarConfirmCancel'),
+    // 登录设置
+    settingsBtn: $('settingsBtn'), loginBtn: $('loginBtn'),
+    settingsModal: $('settingsModal'), settingsErr: $('settingsErr'),
+    pwViewSet: $('pwViewSet'), pwViewSet2: $('pwViewSet2'),
+    pwViewChange: $('pwViewChange'), pwViewDel: $('pwViewDel'),
+    pwSet1: $('pwSet1'), pwSet2: $('pwSet2'),
+    pwOld: $('pwOld'), pwChg1: $('pwChg1'), pwChg2: $('pwChg2'), pwDel: $('pwDel'),
+    pwActionsSet: $('pwActionsSet'), pwActionsSet2: $('pwActionsSet2'),
+    pwActionsChange: $('pwActionsChange'), pwActionsDel: $('pwActionsDel'),
+    settingsCancel: $('settingsCancel'), settingsCancel2: $('settingsCancel2'),
+    pwSave: $('pwSave'), pwChangeBtn: $('pwChangeBtn'), pwRemoveBtn: $('pwRemoveBtn'),
+    pwChangeBack: $('pwChangeBack'), pwChangeOk: $('pwChangeOk'),
+    pwDelBack: $('pwDelBack'), pwDelOk: $('pwDelOk'),
+    // 登录身份
+    loginModal: $('loginModal'), loginName: $('loginName'), loginPw: $('loginPw'),
+    loginErr: $('loginErr'), loginOk: $('loginOk'), loginCancel: $('loginCancel'),
   };
 
   const RECALL_WINDOW = 2 * 60 * 1000;    // 撤回时限
@@ -73,6 +89,8 @@
     pickedColor: '',   // 在调色板里选中、但还没确认的颜色
     pickedImage: '',       // 选中的图片（dataURL），还没确认
     pickedImageData: '',   // 选中的图片（dataURL），待上传
+    loginSet: false,   // 我有没有设置个人登录密码
+    hasLogin: false,   // 房间里有没有人设置过个人登录密码
   };
 
   /* ---------------- 工具 ---------------- */
@@ -445,6 +463,9 @@
         } else if (!state.colors.length) {
           state.colors = FALLBACK_COLORS;
         }
+        // 个人登录密码状态
+        state.loginSet = !!data.loginSet;
+        state.hasLogin = !!data.hasLogin;
         renderMe();
         renderUsers();
         renderMessages({ stickBottom: true });
@@ -550,6 +571,81 @@
         renderMessages();
         break;
       }
+
+      /* ---------------- 个人登录密码 ---------------- */
+
+      case 'loginInfo': {
+        state.loginSet = !!data.set;
+        state.hasLogin = !!data.hasAny;
+        // 面板开着的时候刷新一下视图（别人可能刚设好/刚移除）
+        if (!el.settingsModal.hidden) showPwView(state.loginSet ? 'set2' : 'set');
+        break;
+      }
+
+      case 'loginAck': {
+        // 设置 / 修改 / 移除密码的回执，同时也可能是「登录身份」失败
+        if (data.set !== undefined) state.loginSet = !!data.set;
+        if (data.ok) state.hasLogin = true;
+        el.loginOk.disabled = false;
+        el.loginOk.textContent = '登录';
+        if (!data.ok) {
+          // 错误要显示在「当前开着」的那个面板里：
+          // 登录身份失败 → 显示在登录框下面；
+          // 设密码失败 → 显示在设置面板里。
+          if (!el.loginModal.hidden) {
+            el.loginErr.hidden = false;
+            el.loginErr.textContent = data.msg || '登录没成功，再试一次。';
+          } else {
+            settingsError(data.msg || '操作没成功，再试一次。');
+          }
+          return;
+        }
+        // 成功：回到「已设置」视图，清掉输入框
+        for (const n of [el.pwSet1, el.pwSet2, el.pwOld, el.pwChg1, el.pwChg2, el.pwDel]) {
+          if (n) n.value = '';
+        }
+        showPwView(state.loginSet ? 'set2' : 'set');
+        pushSystem(data.msg || '登录密码已更新');
+        break;
+      }
+
+      case 'loginOk': {
+        // 身份换回来了
+        el.loginOk.disabled = false;
+        el.loginOk.textContent = '登录';
+        el.loginErr.hidden = true;
+        closeLogin();
+        if (data.unchanged) {
+          pushSystem('已经是这个身份了');
+          break;
+        }
+        state.self = data.user;
+        state.users.set(data.user.id, data.user);
+        if (data.prev) state.users.delete(data.prev.id);
+        // 换回来的身份设过密码 → 面板里要显示「已设置」
+        if (data.loginSet !== undefined) state.loginSet = !!data.loginSet;
+        // 历史重新拿一遍 —— 换回来之后，那些旧消息里「我」发的要变成自己的
+        if (Array.isArray(data.history)) {
+          state.messages = data.history.slice();
+          state.byId = new Map(state.messages.map((m) => [m.id, m]));
+          state.hasMore = !!data.hasMore;
+          el.moreWrap.hidden = !state.hasMore;
+        }
+        renderMe();
+        renderUsers();
+        renderMessages({ stickBottom: true });
+        pushSystem(`已登录回来：${data.user.name}`);
+        break;
+      }
+
+      case 'identity': {
+        // 别人换回了原来的身份（临时昵称走了，「我」回来了）
+        if (data.prev) state.users.delete(data.prev.id);
+        state.users.set(data.user.id, data.user);
+        renderUsers();
+        pushSystem(`${data.user.name} 登录回来了`);
+        break;
+      }
     }
   }
 
@@ -570,15 +666,15 @@
       const li = document.createElement('li');
 
       const av = document.createElement('div');
-      av.className = 'avatar';
+      av.className = 'avatar u-avatar';
       // 侧栏头像只有 22px，放两个字会挤，只用单字（字号由 CSS 统一控制）
       paintAvatar(av, u.color, (u.name || '?').slice(0, 1), u.avatar);
-      av.style.width = '22px';
-      av.style.height = '22px';
 
       const nm = document.createElement('span');
       nm.className = 'u-name';
       nm.textContent = u.name;
+      // 手机上名字被截断时，长按能看全名
+      nm.title = u.name;
 
       li.appendChild(av);
       li.appendChild(nm);
@@ -987,6 +1083,119 @@
     el.emojiPanel.replaceChildren(frag);
   }
 
+  /* ---------------- 登录设置（自己设密码） ---------------- */
+
+  /**
+   * 设置面板里的四个小视图：
+   *   A pwViewSet    第一次设密码
+   *   B pwViewSet2   已经设好了
+   *   C pwViewChange 改密码
+   *   D pwViewDel    移除密码
+   * 用一个函数统一切换，免得四处各写一遍 hidden 的开关（容易漏）。
+   */
+  function showPwView(view) {
+    el.pwViewSet.hidden = view !== 'set';
+    el.pwViewSet2.hidden = view !== 'set2';
+    el.pwViewChange.hidden = view !== 'change';
+    el.pwViewDel.hidden = view !== 'del';
+    el.pwActionsSet.hidden = view !== 'set';
+    el.pwActionsSet2.hidden = view !== 'set2';
+    el.pwActionsChange.hidden = view !== 'change';
+    el.pwActionsDel.hidden = view !== 'del';
+    el.settingsErr.hidden = true;
+    el.settingsErr.textContent = '';
+    const focusMap = { set: el.pwSet1, change: el.pwOld, del: el.pwDel };
+    const f = focusMap[view];
+    if (f) setTimeout(() => { try { f.focus(); } catch { /* ignore */ } }, 30);
+  }
+
+  function openSettings() {
+    showPwView(state.loginSet ? 'set2' : 'set');
+    el.settingsModal.hidden = false;
+    // 问一下服务端最新状态，避免本地记的过期
+    wsSend({ t: 'loginInfo' });
+  }
+
+  function closeSettings() {
+    el.settingsModal.hidden = true;
+    // 清掉密码输入框 —— 别把明文密码留在页面里
+    for (const n of [el.pwSet1, el.pwSet2, el.pwOld, el.pwChg1, el.pwChg2, el.pwDel]) {
+      if (n) n.value = '';
+    }
+  }
+
+  function settingsError(msg) {
+    el.settingsErr.hidden = false;
+    el.settingsErr.textContent = msg || '操作没成功，再试一次。';
+  }
+
+  /** 保存第一次设置的密码 */
+  function savePassword() {
+    const a = el.pwSet1.value;
+    const b = el.pwSet2.value;
+    if (!a) { settingsError('请输入密码。'); return; }
+    if (a.length < 4) { settingsError('密码至少 4 位。'); return; }
+    if (a !== b) { settingsError('两次输入的密码不一样，再输一次。'); return; }
+    wsSend({ t: 'loginSet', pw: a });
+  }
+
+  /** 保存新密码 */
+  function changePassword() {
+    const oldPw = el.pwOld.value;
+    const a = el.pwChg1.value;
+    const b = el.pwChg2.value;
+    if (!oldPw) { settingsError('请输入原密码。'); return; }
+    if (!a) { settingsError('请输入新密码。'); return; }
+    if (a.length < 4) { settingsError('新密码至少 4 位。'); return; }
+    if (a !== b) { settingsError('两次输入的密码不一样，再输一次。'); return; }
+    wsSend({ t: 'loginChange', oldPw, newPw: a });
+  }
+
+  /** 移除密码 */
+  function removePassword() {
+    const pw = el.pwDel.value;
+    if (!pw) { settingsError('请输入密码确认。'); return; }
+    wsSend({ t: 'loginRemove', pw });
+  }
+
+  /* ---------------- 登录已有身份 ---------------- */
+
+  function openLogin() {
+    el.loginErr.hidden = true;
+    el.loginName.value = state.self ? state.self.name : '';
+    el.loginPw.value = '';
+    el.loginModal.hidden = false;
+    setTimeout(() => { try { el.loginPw.focus(); } catch { /* ignore */ } }, 30);
+  }
+
+  function closeLogin() {
+    el.loginModal.hidden = true;
+    el.loginPw.value = '';
+  }
+
+  function submitLogin() {
+    const name = String(el.loginName.value || '').trim();
+    const pw = String(el.loginPw.value || '');
+    if (!name) {
+      el.loginErr.hidden = false;
+      el.loginErr.textContent = '请填写原来的昵称。';
+      return;
+    }
+    if (!pw) {
+      el.loginErr.hidden = false;
+      el.loginErr.textContent = '请填写登录密码。';
+      return;
+    }
+    el.loginErr.hidden = true;
+    if (!wsSend({ t: 'loginClaim', name, pw })) {
+      el.loginErr.hidden = false;
+      el.loginErr.textContent = '还没连上服务器，稍等一下再试。';
+      return;
+    }
+    el.loginOk.disabled = true;
+    el.loginOk.textContent = '登录中…';
+  }
+
   /* ---------------- 事件绑定 ---------------- */
 
   // 被别的连接顶替时，点连接状态可以「换新身份重新进入」
@@ -1050,6 +1259,29 @@
     }
   });
 
+  /* ---------------- 登录设置 / 登录身份 ---------------- */
+
+  el.settingsBtn.addEventListener('click', openSettings);
+  el.loginBtn.addEventListener('click', openLogin);
+  el.settingsCancel.addEventListener('click', closeSettings);
+  el.settingsCancel2.addEventListener('click', closeSettings);
+  el.pwSave.addEventListener('click', savePassword);
+  el.pwChangeBtn.addEventListener('click', () => showPwView('change'));
+  el.pwRemoveBtn.addEventListener('click', () => showPwView('del'));
+  el.pwChangeBack.addEventListener('click', () => showPwView('set2'));
+  el.pwDelBack.addEventListener('click', () => showPwView('set2'));
+  el.pwChangeOk.addEventListener('click', changePassword);
+  el.pwDelOk.addEventListener('click', removePassword);
+
+  el.loginCancel.addEventListener('click', closeLogin);
+  el.loginOk.addEventListener('click', submitLogin);
+  el.loginPw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitLogin(); }
+  });
+  el.loginName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); el.loginPw.focus(); }
+  });
+
   /* ---------------- 口令弹窗 ---------------- */
 
   el.keyInput.addEventListener('input', updateKeyLen);
@@ -1086,6 +1318,8 @@
     if (e.key !== 'Escape') return;
     if (!el.avatarConfirm.hidden) { closeAvatarConfirm(); return; }
     if (!el.avatarModal.hidden) { closeAvatarPicker(); return; }
+    if (!el.loginModal.hidden) { closeLogin(); return; }
+    if (!el.settingsModal.hidden) { closeSettings(); return; }
     if (!el.keyModal.hidden) {
       closeKeyModal();
       setConn('未输入口令，无法进入房间', false);
@@ -1111,10 +1345,52 @@
     }
   });
 
+  /* ---------------- 手机：跟着键盘/地址栏调整高度 ---------------- */
+
+  /**
+   * 把可视高度写进 --app-h，.app 用它当高度。
+   *
+   * 为什么要手动做：
+   *   100dvh 在多数手机上是对的，但「键盘弹出来」的时候，
+   *   可视高度会变而 dvh 不一定跟着变 —— 结果输入框被键盘挡住一半。
+   *   visualViewport 报告的才是「现在真正能看到多少像素」。
+   */
+  function syncViewportHeight() {
+    const vv = window.visualViewport;
+    const h = vv && vv.height ? vv.height : window.innerHeight;
+    document.documentElement.style.setProperty('--app-h', Math.round(h) + 'px');
+  }
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', syncViewportHeight);
+  }
+  window.addEventListener('resize', syncViewportHeight);
+  window.addEventListener('orientationchange', () => {
+    setTimeout(syncViewportHeight, 120);
+  });
+
+  /**
+   * 手机上把输入框的提示文字换短。
+   *
+   * 「说点什么…（Enter 发送，Shift+Enter 换行）」这一整句在窄屏上会折成两行，
+   * 把输入框撑高、还把真正的输入位置挤到下面去。手机上也没键盘，
+   * 换行提示本来就没用。
+   */
+  function syncPlaceholder() {
+    const narrow = window.matchMedia('(max-width: 760px)').matches;
+    el.input.placeholder = narrow
+      ? '说点什么…'
+      : '说点什么…（Enter 发送，Shift+Enter 换行）';
+  }
+  window.addEventListener('resize', syncPlaceholder);
+  window.addEventListener('orientationchange', syncPlaceholder);
+
   /* ---------------- 启动 ---------------- */
 
   buildEmojiPanel();
   updateTitle();
+  syncViewportHeight();
+  syncPlaceholder();
 
   // 先把口令准备好再连：
   //   链接里带了   → 直接用（朋友点分享链接就是这条路）
@@ -1144,5 +1420,8 @@
   })();
 
   // 暴露给测试脚本使用
-  window.ChatApp = { state, handle, renderMessages, pushSystem, setReplyTo };
+  window.ChatApp = {
+    state, handle, renderMessages, pushSystem, setReplyTo,
+    openSettings, closeSettings, showPwView, openLogin, closeLogin,
+  };
 })();

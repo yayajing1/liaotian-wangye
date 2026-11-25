@@ -199,6 +199,21 @@ db.exec(`
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(created_at);');
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);');
 
+// ---- 设备绑定表 ----
+//
+// 一个账号可以同时在好几台设备上（手机 + 电脑 + 平板）。
+// 老的 users.client_id 一行只能记一个设备，第二个设备一来就把第一个顶掉了，
+// 所以单独开一张表：client_id → user_id，一台设备只属于一个人，
+// 一个人可以有很多台设备。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_devices (
+    client_id  TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL,
+    last_seen  INTEGER NOT NULL
+  );
+`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_user_devices_user ON user_devices(user_id);');
+
 // 昵称全局唯一（在线 + 历史一起算）
 //
 // 老版本只在「在线成员」之间去重：人一离线昵称就被释放，
@@ -259,6 +274,20 @@ if (!userCols.includes('avatar')) {
   db.exec('ALTER TABLE users ADD COLUMN avatar TEXT');
 }
 
+// ---- 个人登录密码 ----
+//
+// 这是「用户自己设的密码」，和房间口令是两回事：
+//   房间口令   → 管「谁能进这个房间」，是大家一起用的
+//   个人密码   → 管「谁是我」，用来在别的设备上把原来的身份认回来
+//
+// 存的是 scrypt 哈希 + 随机盐，不存明文。
+if (!userCols.includes('login_hash')) {
+  db.exec('ALTER TABLE users ADD COLUMN login_hash TEXT');
+}
+if (!userCols.includes('login_salt')) {
+  db.exec('ALTER TABLE users ADD COLUMN login_salt TEXT');
+}
+
 const S = {
   // 新用户：纯 INSERT。名字的唯一性由 idx_users_name 唯一索引在存储层兜底
   insertUser: db.prepare(`
@@ -271,10 +300,32 @@ const S = {
   getUser: db.prepare('SELECT id, name, color, avatar FROM users WHERE id = ?'),
   findByClient: db.prepare('SELECT id, name, color, avatar FROM users WHERE client_id = ?'),
   setClient: db.prepare('UPDATE users SET client_id = ?, last_seen = ? WHERE id = ?'),
+  // 换过身份之后，client_id 可能还挂在别的用户行上 → 先摘掉再写，避免撞唯一索引
+  clearClientOther: db.prepare('UPDATE users SET client_id = NULL WHERE client_id = ? AND id <> ?'),
+  // ---- 设备绑定（一个账号可以有多台设备） ----
+  findDevice: db.prepare('SELECT user_id FROM user_devices WHERE client_id = ?'),
+  setDevice: db.prepare(`
+    INSERT INTO user_devices (client_id, user_id, last_seen) VALUES (?, ?, ?)
+    ON CONFLICT(client_id) DO UPDATE SET user_id = excluded.user_id, last_seen = excluded.last_seen
+  `),
+  touchDevice: db.prepare('UPDATE user_devices SET last_seen = ? WHERE client_id = ?'),
+  deleteDevice: db.prepare('DELETE FROM user_devices WHERE client_id = ?'),
   // 昵称占用查询：排除自己后，还有没有别人占着这个名字（在线 + 历史一起算）
   takenByName: db.prepare('SELECT COUNT(*) AS c FROM users WHERE name = ? AND id <> ?'),
   // 所有已被占用的昵称（自动分配昵称时避开）
   listUsers: db.prepare('SELECT id, name, color, avatar FROM users'),
+  // ---- 个人登录密码用到的几条 ----
+  // 取完整行（含密码哈希），只在自己这条连接里用
+  getUserLogin: db.prepare('SELECT id, name, color, avatar, login_hash, login_salt FROM users WHERE id = ?'),
+  // 按昵称精确找一个人（登录时用）
+  findByName: db.prepare('SELECT id, name, color, avatar, login_hash, login_salt FROM users WHERE name = ?'),
+  setLogin: db.prepare('UPDATE users SET login_hash = ?, login_salt = ? WHERE id = ?'),
+  clearLogin: db.prepare("UPDATE users SET login_hash = NULL, login_salt = NULL WHERE id = ?"),
+  // 房间里有没有人设过密码 → 决定要不要显示「登录已有身份」入口
+  countLoginUsers: db.prepare("SELECT COUNT(*) AS c FROM users WHERE login_hash IS NOT NULL AND login_hash <> ''"),
+  // 某人发过多少条消息 → 决定临时身份能不能直接删掉
+  countMsgs: db.prepare('SELECT COUNT(*) AS c FROM messages WHERE sender_id = ?'),
+  deleteUser: db.prepare('DELETE FROM users WHERE id = ?'),
   // 在线成员的心跳（防止久不发言的在线用户被清理掉）
   touchUser: db.prepare('UPDATE users SET last_seen = ? WHERE id = ?'),
   insertMsg: db.prepare(
@@ -299,10 +350,14 @@ const S = {
   `),
   countAll: db.prepare('SELECT COUNT(*) AS c FROM messages'),
   deleteOlder: db.prepare('DELETE FROM messages WHERE created_at < ?'),
+  // ⚠️ 设过个人登录密码的用户不会被自动清理 ——
+  //    否则「我设了密码，7 天没用，密码自己没了」，登录功能等于白做。
+  //    代价是这个名字会被一直占着，但对这种小房间完全够用。
   deleteStaleUsers: db.prepare(`
     DELETE FROM users
     WHERE id NOT IN (SELECT DISTINCT sender_id FROM messages)
       AND last_seen < ?
+      AND (login_hash IS NULL OR login_hash = '')
   `),
 };
 
@@ -606,6 +661,48 @@ function publicUser(u) {
 }
 
 /* ================================================================== */
+/* 个人登录密码                                                        */
+/* ================================================================== */
+
+// scrypt 参数：N=16384 在这台小机器上单次约 40~80ms，
+// 既不会慢到影响聊天，又足够挡住「拿哈希离线爆破」。
+const SCRYPT_OPTS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
+
+/** 生成密码哈希 + 随机盐 */
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(pw), salt, 32, SCRYPT_OPTS).toString('hex');
+  return { salt, hash };
+}
+
+/**
+ * 校验密码。
+ * 用 timingSafeEqual 比字节，避免「逐字符猜」的时间差。
+ */
+function verifyPassword(pw, hash, salt) {
+  if (!hash || !salt) return false;
+  try {
+    const calc = crypto.scryptSync(String(pw), salt, 32, SCRYPT_OPTS);
+    const known = Buffer.from(String(hash), 'hex');
+    if (known.length !== calc.length) return false;
+    return crypto.timingSafeEqual(known, calc);
+  } catch {
+    return false;
+  }
+}
+
+const LOGIN_PW_MIN = 4;
+const LOGIN_PW_MAX = 64;
+
+/** 密码长度校验，返回 null 表示没问题，否则返回一句提示 */
+function checkPassword(pw) {
+  const s = String(pw ?? '');
+  if (s.length < LOGIN_PW_MIN) return `密码至少 ${LOGIN_PW_MIN} 位`;
+  if (s.length > LOGIN_PW_MAX) return `密码最多 ${LOGIN_PW_MAX} 位`;
+  return null;
+}
+
+/* ================================================================== */
 /* 图片头像                                                            */
 /* ================================================================== */
 
@@ -881,24 +978,39 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  /* ---------- 身份解析：优先复用该浏览器上次的身份 ---------- */
+  /* ---------- 身份解析：优先复用这台设备上次的身份 ---------- */
   let clientId = '';
   try {
     clientId = String(new URL(req.url, 'http://localhost').searchParams.get('cid') || '').slice(0, 64);
   } catch { clientId = ''; }
 
-  const known = clientId ? S.findByClient.get(clientId) : null;
+  // 先查设备绑定表（一台设备只属于一个人）
+  let known = null;
+  if (clientId) {
+    const dev = S.findDevice.get(clientId);
+    if (dev) known = S.getUser.get(dev.user_id) || null;
+    // 兼容老数据：还没有设备表记录，但 users.client_id 上有
+    if (!known) {
+      known = S.findByClient.get(clientId);
+      if (known) S.setDevice.run(clientId, known.id, now);
+    }
+  }
 
   let user;
   if (known) {
-    // 同一浏览器刷新/重连 → 沿用原来的 id、昵称、颜色、图片头像
+    // 同一台设备刷新/重连 → 沿用原来的 id、昵称、颜色、图片头像
     //
     // ⚠️ 用户的核心要求：「进去后名字和头像，没要求改动就保持不变」。
     // 所以这里必须把 avatar 一起带回来 —— 少了它，用户换了图片头像后
     // 一刷新就退回默认头像了。
     user = { id: known.id, name: known.name, color: known.color, avatar: known.avatar || '' };
     user.name = uniqueName(user.name, user.id);   // 期间被别人占用过则自动改名
-    S.setClient.run(clientId, now, user.id);
+    if (clientId) {
+      // 这个 client_id 可能还挂在别的用户行上（换过身份）→ 先摘掉
+      try { S.clearClientOther.run(clientId, user.id); } catch { /* ignore */ }
+      try { S.setClient.run(clientId, now, user.id); } catch { /* ignore */ }
+      S.setDevice.run(clientId, user.id, now);
+    }
     try {
       S.renameUser.run(user.name, user.color, now, user.id);
     } catch (err) {
@@ -909,7 +1021,12 @@ wss.on('connection', (ws, req) => {
   } else {
     user = createUser();
     persistUser(user, now);
-    if (clientId) S.setClient.run(clientId, now, user.id);
+    if (clientId) {
+      try { S.clearClientOther.run(clientId, user.id); } catch { /* ignore */ }
+      try { S.setClient.run(clientId, now, user.id); } catch { /* ignore */ }
+      // 这台设备绑定到这个新账号（之后刷新就是「我」了）
+      S.setDevice.run(clientId, user.id, now);
+    }
   }
 
   // 同一 client_id 重新连接（刷新页面）→ 顶掉旧连接，且不广播 leave
@@ -935,6 +1052,7 @@ wss.on('connection', (ws, req) => {
   // 初始化：身份 + 在线成员 + 最近一页历史
   const rows = S.latest.all(PAGE_SIZE);
   const total = S.countAll.get().c;
+  const meRow = S.getUserLogin.get(user.id);
   send(ws, {
     t: 'init',
     self: publicUser(user),
@@ -944,6 +1062,11 @@ wss.on('connection', (ws, req) => {
     // 头像可选的颜色列表 —— 由服务端下发，客户端照着渲染调色板，
     // 这样客户端和服务端永远用同一份色池，不会出现「选了却没生效」。
     colors: COLOR_POOL,
+    // 个人登录密码的状态：
+    //   set    → 我自己设过密码（设置面板里显示「已设置」）
+    //   hasAny → 房间里有人设过密码（决定要不要显示「登录已有身份」入口）
+    loginSet: !!(meRow && meRow.login_hash),
+    hasLogin: S.countLoginUsers.get().c > 0,
   });
 
   broadcast({ t: 'join', user: publicUser(user) }, ws);
@@ -1084,6 +1207,130 @@ wss.on('connection', (ws, req) => {
         });
         break;
       }
+
+      /* ================= 个人登录密码 ================= */
+
+      /* ---------- 查询状态：我设了没？房间里有人设了没？ ---------- */
+      case 'loginInfo': {
+        const row = S.getUserLogin.get(user.id);
+        send(ws, {
+          t: 'loginInfo',
+          set: !!(row && row.login_hash),
+          hasAny: S.countLoginUsers.get().c > 0,
+        });
+        break;
+      }
+
+      /* ---------- 设置密码（第一次） ---------- */
+      case 'loginSet': {
+        const pw = String(data.pw ?? '');
+        const bad = checkPassword(pw);
+        if (bad) { send(ws, { t: 'loginAck', ok: false, msg: bad }); break; }
+
+        const { salt, hash } = hashPassword(pw);
+        S.setLogin.run(hash, salt, user.id);
+        send(ws, { t: 'loginAck', ok: true, msg: '登录密码已设置', set: true });
+        break;
+      }
+
+      /* ---------- 修改密码（要验旧密码） ---------- */
+      case 'loginChange': {
+        const row = S.getUserLogin.get(user.id);
+        if (!row || !row.login_hash) {
+          send(ws, { t: 'loginAck', ok: false, msg: '还没设置过密码' });
+          break;
+        }
+        if (!verifyPassword(String(data.oldPw ?? ''), row.login_hash, row.login_salt)) {
+          send(ws, { t: 'loginAck', ok: false, msg: '原密码不对' });
+          break;
+        }
+        const bad = checkPassword(String(data.newPw ?? ''));
+        if (bad) { send(ws, { t: 'loginAck', ok: false, msg: bad }); break; }
+
+        const { salt, hash } = hashPassword(String(data.newPw));
+        S.setLogin.run(hash, salt, user.id);
+        send(ws, { t: 'loginAck', ok: true, msg: '密码已修改', set: true });
+        break;
+      }
+
+      /* ---------- 移除密码 ---------- */
+      case 'loginRemove': {
+        const row = S.getUserLogin.get(user.id);
+        if (!row || !row.login_hash) {
+          send(ws, { t: 'loginAck', ok: false, msg: '还没设置过密码' });
+          break;
+        }
+        if (!verifyPassword(String(data.pw ?? ''), row.login_hash, row.login_salt)) {
+          send(ws, { t: 'loginAck', ok: false, msg: '密码不对' });
+          break;
+        }
+        S.clearLogin.run(user.id);
+        send(ws, { t: 'loginAck', ok: true, msg: '密码已移除', set: false });
+        break;
+      }
+
+      /* ---------- 登录：把原来的身份认回来 ---------- */
+      //
+      // 场景：换手机、换电脑、清了浏览器缓存 → 本机没有 client_id，
+      // 服务端给的是个临时昵称。这时用「昵称 + 密码」把原来的身份换回来。
+      case 'loginClaim': {
+        const name = String(data.name ?? '').trim().slice(0, MAX_NAME);
+        const pw = String(data.pw ?? '');
+        if (!name || !pw) {
+          send(ws, { t: 'loginAck', ok: false, msg: '请填写昵称和密码' });
+          break;
+        }
+
+        const row = S.findByName.get(name);
+        // 密码错 / 没设过密码 —— 两种情况给同一句话，避免被拿来探昵称
+        if (!row || !row.login_hash || !verifyPassword(pw, row.login_hash, row.login_salt)) {
+          send(ws, { t: 'loginAck', ok: false, msg: '昵称或密码不对' });
+          break;
+        }
+        if (row.id === user.id) {
+          // 已经是这个身份了，不用换
+          send(ws, { t: 'loginOk', user: publicUser(user), unchanged: true });
+          break;
+        }
+
+        const oldUser = user;
+        const now = Date.now();
+
+        // 1) 临时身份先摘掉 client_id（不然会撞唯一索引），一条消息都没发过的直接删掉，
+        //    把这个昵称立刻释放回池子 —— 不留「用完就扔」的僵尸行
+        try { S.setClient.run(null, now, oldUser.id); } catch { /* ignore */ }
+        if (S.countMsgs.get(oldUser.id).c === 0) {
+          try { S.deleteUser.run(oldUser.id); } catch { /* ignore */ }
+        }
+
+        // 2) 这台设备绑定到这个账号 → 以后刷新就是「我」，不用再输密码。
+        //    老设备（手机、电脑）的绑定不动 —— 同一个账号可以同时在好几台上。
+        if (ws.clientId) {
+          try { S.setDevice.run(ws.clientId, row.id, now); } catch { /* ignore */ }
+        }
+
+        // 3) 切换身份
+        user = { id: row.id, name: row.name, color: row.color, avatar: row.avatar || '' };
+        ws.user = user;
+        clients.set(ws, user);
+
+        // 4) 告诉其他人：临时昵称走了，「我」回来了
+        broadcast({ t: 'identity', user: publicUser(user), prev: publicUser(oldUser) }, ws);
+
+        // 5) 回执 + 最新一页历史（把身份换回来后，历史消息里「我」的那些也会变成自己的）
+        const rows2 = S.latest.all(PAGE_SIZE);
+        const total2 = S.countAll.get().c;
+        send(ws, {
+          t: 'loginOk',
+          user: publicUser(user),
+          prev: publicUser(oldUser),
+          // 换回来的这个身份设过密码 → 客户端把「已设置」状态也带过去
+          loginSet: !!row.login_hash,
+          history: rows2.reverse().map(toMessage),
+          hasMore: total2 > rows2.length,
+        });
+        break;
+      }
     }
   });
 
@@ -1097,7 +1344,14 @@ wss.on('connection', (ws, req) => {
     // 注意：离线不释放昵称 —— 用户行还在，昵称继续被占用，
     // 这样历史消息里就不会出现两个同名的人。
     if (!ws.replaced) {
-      broadcast({ t: 'leave', user: publicUser(user) });
+      // 同一个账号在别的设备上还开着 → 不算离开（手机关了电脑还在线）
+      let stillHere = false;
+      for (const u of clients.values()) {
+        if (u.id === user.id) { stillHere = true; break; }
+      }
+      if (!stillHere) {
+        broadcast({ t: 'leave', user: publicUser(user) });
+      }
     }
   });
 

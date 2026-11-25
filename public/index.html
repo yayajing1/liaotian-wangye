@@ -25,6 +25,15 @@
 
       <div class="side-label">在线成员 <span id="userCount">0</span></div>
       <ul class="users" id="userList"></ul>
+
+      <div class="side-foot">
+        <button type="button" class="side-link" id="settingsBtn" title="登录密码设置">
+          <span class="side-link-ico">⚙</span><span class="side-link-txt">登录设置</span>
+        </button>
+        <button type="button" class="side-link" id="loginBtn" title="用昵称和密码登录回原来的身份">
+          <span class="side-link-ico">🔑</span><span class="side-link-txt">登录身份</span>
+        </button>
+      </div>
     </aside>
 
     <main class="chat">
@@ -115,6 +124,94 @@
       <div class="modal-actions">
         <button type="button" class="modal-btn" id="avatarConfirmCancel">再想想</button>
         <button type="button" class="modal-btn primary" id="avatarConfirmOk">确定修改</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 登录设置：给自己设一个登录密码（换设备时用昵称+密码把身份认回来） -->
+  <div class="modal-mask" id="settingsModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <h2 class="modal-title" id="settingsTitle">登录设置</h2>
+      <p class="modal-desc">
+        给自己设一个登录密码。换手机、换电脑后，用「昵称 + 密码」就能把原来的名字、头像和聊天记录找回来。
+      </p>
+
+      <!-- A：还没设置过 -->
+      <div id="pwViewSet">
+        <label class="field-label" for="pwSet1">新密码</label>
+        <input class="modal-input" id="pwSet1" type="password" autocomplete="new-password"
+          placeholder="至少 4 位" spellcheck="false">
+        <label class="field-label" for="pwSet2">再输一次</label>
+        <input class="modal-input" id="pwSet2" type="password" autocomplete="new-password"
+          placeholder="再输一次" spellcheck="false">
+      </div>
+
+      <!-- B：已经设置过 -->
+      <div id="pwViewSet2" hidden>
+        <div class="pw-state">
+          <span class="pw-dot"></span>已设置登录密码
+        </div>
+        <p class="pw-hint">记住它 —— 密码丢了就找不回这个身份了（聊天记录不会被删，只是没法用这个名字登录）。</p>
+      </div>
+
+      <!-- C：修改密码 -->
+      <div id="pwViewChange" hidden>
+        <label class="field-label" for="pwOld">原密码</label>
+        <input class="modal-input" id="pwOld" type="password" autocomplete="current-password"
+          placeholder="原密码" spellcheck="false">
+        <label class="field-label" for="pwChg1">新密码</label>
+        <input class="modal-input" id="pwChg1" type="password" autocomplete="new-password"
+          placeholder="至少 4 位" spellcheck="false">
+        <label class="field-label" for="pwChg2">再输一次</label>
+        <input class="modal-input" id="pwChg2" type="password" autocomplete="new-password"
+          placeholder="再输一次" spellcheck="false">
+      </div>
+
+      <!-- D：移除密码（要验密码） -->
+      <div id="pwViewDel" hidden>
+        <p class="pw-hint">移除后就只能用当前浏览器进入（换设备认不回来了）。</p>
+        <label class="field-label" for="pwDel">登录密码</label>
+        <input class="modal-input" id="pwDel" type="password" autocomplete="current-password"
+          placeholder="确认密码" spellcheck="false">
+      </div>
+
+      <p class="modal-err" id="settingsErr" hidden></p>
+
+      <div class="modal-actions" id="pwActionsSet">
+        <button type="button" class="modal-btn" id="settingsCancel">关闭</button>
+        <button type="button" class="modal-btn primary" id="pwSave">保存密码</button>
+      </div>
+      <div class="modal-actions" id="pwActionsSet2" hidden>
+        <button type="button" class="modal-btn" id="settingsCancel2">关闭</button>
+        <button type="button" class="modal-btn" id="pwChangeBtn">修改密码</button>
+        <button type="button" class="modal-btn danger" id="pwRemoveBtn">移除密码</button>
+      </div>
+      <div class="modal-actions" id="pwActionsChange" hidden>
+        <button type="button" class="modal-btn" id="pwChangeBack">返回</button>
+        <button type="button" class="modal-btn primary" id="pwChangeOk">保存新密码</button>
+      </div>
+      <div class="modal-actions" id="pwActionsDel" hidden>
+        <button type="button" class="modal-btn" id="pwDelBack">返回</button>
+        <button type="button" class="modal-btn danger" id="pwDelOk">确认移除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 登录：用昵称 + 密码把原来的身份认回来 -->
+  <div class="modal-mask" id="loginModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+      <h2 class="modal-title" id="loginTitle">登录身份</h2>
+      <p class="modal-desc">输入你原来的昵称和登录密码，名字、头像和聊天记录都会找回来。</p>
+      <label class="field-label" for="loginName">原来的昵称</label>
+      <input class="modal-input" id="loginName" type="text" autocomplete="off"
+        autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="例如：小满">
+      <label class="field-label" for="loginPw">登录密码</label>
+      <input class="modal-input" id="loginPw" type="password" autocomplete="current-password"
+        placeholder="你设置的密码" spellcheck="false">
+      <p class="modal-err" id="loginErr" hidden></p>
+      <div class="modal-actions">
+        <button type="button" class="modal-btn" id="loginCancel">取消</button>
+        <button type="button" class="modal-btn primary" id="loginOk">登录</button>
       </div>
     </div>
   </div>
