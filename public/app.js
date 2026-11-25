@@ -17,6 +17,9 @@
     quoteBar: $('quoteBar'), quoteLabel: $('quoteLabel'), quoteText: $('quoteText'),
     quoteClose: $('quoteClose'),
     input: $('input'), sendBtn: $('sendBtn'), emojiBtn: $('emojiBtn'), emojiPanel: $('emojiPanel'),
+    keyModal: $('keyModal'), keyModalDesc: $('keyModalDesc'), keyInput: $('keyInput'),
+    keyLen: $('keyLen'), keyPaste: $('keyPaste'), keyErr: $('keyErr'),
+    keyOk: $('keyOk'), keyCancel: $('keyCancel'),
   };
 
   const RECALL_WINDOW = 2 * 60 * 1000;    // 撤回时限
@@ -84,17 +87,25 @@
    * 最后退回上次记住的（localStorage）。
    */
   function getRoomKey() {
+    // ⚠️ 分两步走，不要把「读 URL」和「读 localStorage」包在同一个 try 里。
+    // localStorage 在部分环境（微信内置浏览器的某些模式、无痕窗口、
+    // 存储被禁用时）会直接抛异常；原来一个 catch 把整个函数兜住，
+    // 结果**已经从链接里读到的正确口令也被一起抹成空**，
+    // 客户端就会拿着空口令去连 → 服务端拒绝 → 弹窗 → 用户重新输。
     let key = '';
     try {
-      const params = new URLSearchParams(location.search);
-      key = params.get('key') || '';
+      key = new URLSearchParams(location.search).get('key') || '';
       if (!key && location.hash) {
-        const h = new URLSearchParams(location.hash.replace(/^#/, ''));
-        key = h.get('key') || '';
+        key = new URLSearchParams(location.hash.replace(/^#/, '')).get('key') || '';
       }
-      if (!key) key = localStorage.getItem(KEY_STORE) || '';
-      if (key) localStorage.setItem(KEY_STORE, key);
     } catch { key = ''; }
+
+    if (!key) {
+      try { key = localStorage.getItem(KEY_STORE) || ''; } catch { key = ''; }
+    }
+    if (key) {
+      try { localStorage.setItem(KEY_STORE, key); } catch { /* ignore */ }
+    }
     return key;
   }
 
@@ -219,7 +230,13 @@
       // 口令不对：别再傻等重连了，弹框让人输口令
       if (evt.code === 4001) {
         setConn('房间口令不正确', false);
-        askRoomKey();
+        askRoomKey('口令不对，请重新输入。');
+        return;
+      }
+      // 被同一浏览器的另一个连接顶替（刷新 / 开了两个标签页）
+      // —— 这不是故障，重连只会互相踢，所以不重连。
+      if (evt.code === 4002) {
+        setConn('已在别处打开本房间', false);
         return;
       }
       const delay = Math.min(1000 * Math.pow(2, state.retry++), 30000);
@@ -230,14 +247,49 @@
     ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
   }
 
-  /** 口令不对时，问一句要口令 */
-  function askRoomKey() {
-    const input = window.prompt('这个房间需要口令。请输入口令：');
-    if (input === null) return;               // 用户取消
-    const key = String(input).trim();
-    if (!key) return;
+  /**
+   * 口令不对时，问一句要口令。
+   *
+   * 这里原本用的是 window.prompt()，在微信内置浏览器里体验极差：
+   *   1) 原生弹窗样式崩坏，输入框小到看不清自己打了几个字；
+   *   2) 点「确定」后如果服务端再拒一次，又弹一个，用户根本不知道刚才输的啥；
+   *   3) 手机上手指大，容易少打/多打一个字符 —— 而服务端是定长精确比对，
+   *      少一个字符就直接被拒，用户会陷入「确认后反复弹」的循环。
+   * 改成页面内弹窗：输入实时可见、显示字数、有「粘贴」按钮、错误提示留在原地。
+   */
+  function askRoomKey(reason) {
+    if (el.keyModal.hidden) {
+      el.keyModal.hidden = false;
+      el.keyInput.value = state.key || '';
+      updateKeyLen();
+      setTimeout(() => { try { el.keyInput.focus(); el.keyInput.select(); } catch { /* ignore */ } }, 30);
+    }
+    if (reason) {
+      el.keyErr.hidden = false;
+      el.keyErr.textContent = reason;
+    }
+  }
+
+  function closeKeyModal() {
+    el.keyModal.hidden = true;
+    el.keyErr.hidden = true;
+  }
+
+  function updateKeyLen() {
+    const n = String(el.keyInput.value || '').trim().length;
+    el.keyLen.textContent = `${n} 位`;
+  }
+
+  function submitRoomKey() {
+    const key = String(el.keyInput.value || '').trim();
+    if (!key) {
+      el.keyErr.hidden = false;
+      el.keyErr.textContent = '口令不能为空。';
+      return;
+    }
     setRoomKey(key);
     state.key = key;
+    closeKeyModal();
     connect();
   }
 
@@ -246,7 +298,10 @@
       case 'error': {
         // 服务端拒绝了我们（目前只有「口令不对」这一种）
         setConn(data.msg || '出错了', false);
-        if (data.code === 'bad_key') askRoomKey();
+        if (data.code === 'bad_key') {
+          const n = String(state.key || '').trim().length;
+          askRoomKey(`口令不对。你刚才输入的是 ${n} 位，请检查是否漏了字符（可以用「粘贴」按钮）。`);
+        }
         break;
       }
 
@@ -625,6 +680,45 @@
   el.quoteClose.addEventListener('click', clearReplyTo);
   el.moreBtn.addEventListener('click', loadMore);
 
+  /* ---------------- 口令弹窗 ---------------- */
+
+  el.keyInput.addEventListener('input', updateKeyLen);
+
+  el.keyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitRoomKey(); }
+  });
+
+  el.keyOk.addEventListener('click', submitRoomKey);
+
+  el.keyCancel.addEventListener('click', () => {
+    closeKeyModal();
+    setConn('未输入口令，无法进入房间', false);
+  });
+
+  // 「粘贴」按钮：手机上打字最容易少字符，一键粘贴最稳
+  el.keyPaste.addEventListener('click', async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        el.keyInput.value = text.trim();
+        updateKeyLen();
+        el.keyErr.hidden = true;
+      }
+    } catch {
+      // 剪贴板不可用（非 HTTPS / 用户拒绝），提示手动输入
+      el.keyErr.hidden = false;
+      el.keyErr.textContent = '无法读取剪贴板，请手动长按输入框粘贴。';
+    }
+  });
+
+  // 点遮罩不关闭（必须明确选择），但 Esc 可以关
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.keyModal.hidden) {
+      closeKeyModal();
+      setConn('未输入口令，无法进入房间', false);
+    }
+  });
+
   el.emojiBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     el.emojiPanel.hidden = !el.emojiPanel.hidden;
@@ -656,6 +750,12 @@
   (async () => {
     state.key = getRoomKey();
     if (!state.key) state.key = await fetchLocalKey();
+    if (!state.key) {
+      // 没有口令就别先连一次被拒了 —— 直接弹窗，省一次往返
+      setConn('需要房间口令', false);
+      askRoomKey('请输入房间口令后进入。');
+      return;
+    }
     connect();
   })();
 

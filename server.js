@@ -546,11 +546,16 @@ function serveStatic(req, res) {
   // 效果：主人在本机打开页面能自动进（不用手输口令），
   // 朋友必须用带口令的分享链接，陌生人什么都拿不到。
   if (pathname === '/api/room-key') {
-    const remote = req.socket.remoteAddress || '';
+    // ⚠️ 安全要点：反向代理后面 req.socket.remoteAddress 永远是 nginx 的 127.0.0.1，
+    // 所以「只看 remoteAddress」等于没校验 —— 任何人都能伪造 `Host: localhost`
+    // 拿到房间口令。必须用 X-Forwarded-For 里的**真实客户端 IP**来判断。
+    // 没有该头 = 直连本机（本地开发），这时才看 remoteAddress。
+    const fwd = String(req.headers['x-forwarded-for'] || '');
+    const realIp = (fwd ? fwd.split(',')[0] : String(req.socket.remoteAddress || '')).trim();
+    const isLoopback = realIp === '127.0.0.1' || realIp === '::1' || realIp === '::ffff:127.0.0.1';
     const host = String(req.headers.host || '').split(':')[0];
-    const fromLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
     const localHost = host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
-    if (!fromLoopback || !localHost) {
+    if (!isLoopback || !localHost) {
       res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: 'forbidden' }));
       return;
@@ -676,7 +681,9 @@ wss.on('connection', (ws, req) => {
     const old = cidClients.get(clientId);
     if (old && old !== ws) {
       old.replaced = true;
-      try { old.close(); } catch { /* ignore */ }
+      // 用专属关闭码 4002：客户端据此知道「你被新连接顶替了」，
+      // 而不是当成网络故障去无限重连（那会造成两个标签页互相踢、无限循环）。
+      try { old.close(4002, 'replaced'); } catch { /* ignore */ }
     }
     cidClients.set(clientId, ws);
   }

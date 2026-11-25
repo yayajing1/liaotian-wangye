@@ -469,3 +469,122 @@ body {
 }
 
 .emoji-panel button:hover { background: #eaf4fc; }
+
+/* ================================================================
+   房间口令弹窗
+   为什么不用 window.prompt：
+   原生弹窗在微信内置浏览器里样式崩坏、输入框小到看不清，
+   而且确认后再次弹窗时用户根本不知道刚才输的是啥 ——
+   一次手滑少打一个字符，服务端就会拒掉。
+   这里改成页面内弹窗：输入可见、有字数提示、有「粘贴」按钮。
+   ================================================================ */
+
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(24, 28, 33, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 14px;
+  padding: 22px 22px 18px;
+  width: 100%;
+  max-width: 360px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+}
+
+.modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.modal-desc {
+  font-size: 13px;
+  color: #6b7280;
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+
+.modal-input {
+  width: 100%;
+  border: 1px solid #d8dce1;
+  border-radius: 9px;
+  padding: 11px 12px;
+  font-size: 16px;              /* ≥16px：手机端才不会自动放大页面 */
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: 1px;
+  color: #1c1e21;
+  outline: none;
+}
+
+.modal-input:focus {
+  border-color: #4a9eff;
+  box-shadow: 0 0 0 3px rgba(74, 158, 255, 0.18);
+}
+
+.modal-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #8a9199;
+}
+
+.modal-paste {
+  border: 1px solid #d8dce1;
+  background: #f6f8fa;
+  border-radius: 7px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #4a9eff;
+  cursor: pointer;
+}
+
+.modal-paste:active { background: #eaf4fc; }
+
+.modal-err {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: #d4483b;
+  line-height: 1.6;
+  background: #fdf1f0;
+  border: 1px solid #f5d5d2;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.modal-btn {
+  flex: 1;
+  border: 1px solid #d8dce1;
+  background: #fff;
+  border-radius: 9px;
+  padding: 10px 14px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #4b5563;
+  cursor: pointer;
+}
+
+.modal-btn.primary {
+  background: #4a9eff;
+  border-color: #4a9eff;
+  color: #fff;
+  font-weight: 500;
+}
+
+.modal-btn:active { opacity: 0.85; }
