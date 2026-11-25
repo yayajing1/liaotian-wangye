@@ -222,17 +222,40 @@
    * @param {string} [avatar] 图片头像文件名（服务端给的 token.png）
    *
    * 有图片头像时用图片铺满圆形，没有才退回「底色 + 昵称首字」。
+   *
+   * 用真实的 <img> 而不是 background-image：
+   * background-image 加载失败时是「静默失败」—— 头像变成一个空白圆，
+   * 用户完全不知道为什么。而 <img> 有 onerror，可以退回字母头像，
+   * 至少还能认出是谁。
    */
   function paintAvatar(node, color, text, avatar) {
     const hasImg = !!avatar;
     node.setAttribute('data-img', hasImg ? '1' : '0');
+
+    // 先把上一次的图片清掉
+    const old = node.querySelector('img');
+    if (old) old.remove();
+
     if (hasImg) {
-      node.style.backgroundImage = `url("${avatarUrl(avatar)}")`;
-      node.style.backgroundColor = 'transparent';
-      node.style.backgroundSize = 'cover';
-      node.style.backgroundPosition = 'center';
+      node.style.background = 'transparent';
       node.textContent = '';
       node.setAttribute('data-len', '0');
+      const img = document.createElement('img');
+      img.src = avatarUrl(avatar);
+      img.alt = '';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      // 加载失败（文件没了 / 口令轮换了 / 网络断了）→ 退回字母头像
+      img.onerror = () => {
+        img.remove();
+        if (node.getAttribute('data-img') !== '1') return;
+        node.setAttribute('data-img', '0');
+        node.style.background = color;
+        node.style.color = avatarTextColor(color);
+        node.textContent = text !== undefined ? text : '';
+        node.setAttribute('data-len', String((node.textContent || '').length));
+      };
+      node.appendChild(img);
     } else {
       // 用 background 简写 —— 会把 background-image 一并清掉，
       // 从图片头像切回字母头像时不会残留图层。
@@ -288,7 +311,11 @@
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const cid = encodeURIComponent(getClientId());
-    const key = encodeURIComponent(state.key || getRoomKey());
+    // ⚠️ 口令必须写回 state.key ——
+    // 头像图片的 URL 也要带口令（/avatar/<token>?k=xxx），
+    // 如果 state.key 是空的，头像会全部 403 变成空白圆。
+    if (!state.key) state.key = getRoomKey();
+    const key = encodeURIComponent(state.key || '');
     const ws = new WebSocket(`${proto}//${location.host}/ws?cid=${cid}&key=${key}`);
     state.ws = ws;
 
@@ -743,14 +770,31 @@
   /* ---------------- 换头像（新增功能） ---------------- */
 
   /** 打开调色板 */
+  /** 上传区的缩略预览（显示已选图片） */
+  function showUploadPreview(dataUrl) {
+    const box = el.avatarUploadPreview;
+    const old = box.querySelector('img');
+    if (old) old.remove();
+    if (!dataUrl) {
+      box.style.backgroundImage = '';
+      box.textContent = '＋';
+      return;
+    }
+    box.style.backgroundImage = '';
+    box.textContent = '';
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.alt = '';
+    box.appendChild(img);
+  }
+
   function openAvatarPicker() {
     if (!state.self) return;
     state.pickedColor = state.self.color;
     state.pickedImage = '';          // 还没选图
     state.pickedImageData = '';      // 选图后的 base64（发给服务端用）
     el.avatarErr.hidden = true;
-    el.avatarUploadPreview.style.backgroundImage = '';
-    el.avatarUploadPreview.textContent = '＋';
+    showUploadPreview('');
     renderColorGrid();
     el.avatarModal.hidden = false;
   }
@@ -776,17 +820,16 @@
       // 底色深 → 对勾用黑色，否则白色对勾看不见
       if (avatarTextColor(color) === '#2f3336') dot.classList.add('dark');
       if (color === state.pickedColor && !state.pickedImage) dot.classList.add('sel');
-      dot.addEventListener('click', () => {
-        state.pickedColor = color;
-        state.pickedImage = '';        // 选了颜色 → 不用图片
-        state.pickedImageData = '';
-        for (const n of el.colorGrid.children) n.classList.remove('sel');
-        dot.classList.add('sel');
-        el.avatarUploadPreview.style.backgroundImage = '';
-        el.avatarUploadPreview.textContent = '＋';
-        // 选了颜色 → 先问一句「是否确定修改」，不直接改
-        askAvatarConfirm(color);
-      });
+        dot.addEventListener('click', () => {
+          state.pickedColor = color;
+          state.pickedImage = '';        // 选了颜色 → 不用图片
+          state.pickedImageData = '';
+          for (const n of el.colorGrid.children) n.classList.remove('sel');
+          dot.classList.add('sel');
+          showUploadPreview('');
+          // 选了颜色 → 先问一句「是否确定修改」，不直接改
+          askAvatarConfirm(color);
+        });
       el.colorGrid.appendChild(dot);
     }
   }
@@ -839,14 +882,17 @@
   function askAvatarConfirm(color) {
     if (!state.self) return;
     if (state.pickedImage) {
-      // 图片头像：用 dataURL 直接铺在预览上（还没上传，所以不能走 /avatar/）
+      // 图片头像：还没上传，所以只能用 dataURL 直接预览
       el.avatarPreview.setAttribute('data-img', '1');
-      el.avatarPreview.style.backgroundImage = `url("${state.pickedImage}")`;
-      el.avatarPreview.style.backgroundColor = 'transparent';
-      el.avatarPreview.style.backgroundSize = 'cover';
-      el.avatarPreview.style.backgroundPosition = 'center';
+      el.avatarPreview.style.background = 'transparent';
       el.avatarPreview.textContent = '';
       el.avatarPreview.setAttribute('data-len', '0');
+      const old = el.avatarPreview.querySelector('img');
+      if (old) old.remove();
+      const img = document.createElement('img');
+      img.src = state.pickedImage;
+      img.alt = '';
+      el.avatarPreview.appendChild(img);
     } else {
       el.avatarPreview.setAttribute('data-img', '0');
       paintAvatar(el.avatarPreview, color, avatarText(state.self.name));
@@ -989,9 +1035,7 @@
       const dataUrl = await readImageFile(file);
       state.pickedImage = dataUrl;
       state.pickedImageData = dataUrl;
-      // 缩略预览
-      el.avatarUploadPreview.style.backgroundImage = `url("${dataUrl}")`;
-      el.avatarUploadPreview.textContent = '';
+      showUploadPreview(dataUrl);
       // 选了图 → 颜色就不作数了，取消调色板上的高亮
       for (const n of el.colorGrid.children) n.classList.remove('sel');
       // 一样要先问「是否确定修改」
@@ -999,8 +1043,7 @@
     } catch (err) {
       el.avatarErr.hidden = false;
       el.avatarErr.textContent = err.message || '这张图用不了，换一张试试';
-      el.avatarUploadPreview.style.backgroundImage = '';
-      el.avatarUploadPreview.textContent = '＋';
+      showUploadPreview('');
     } finally {
       // 清掉 input 的值 —— 否则连续选同一张图不会触发 change 事件
       try { el.avatarFile.value = ''; } catch { /* ignore */ }

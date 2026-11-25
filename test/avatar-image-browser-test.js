@@ -205,16 +205,16 @@ class CDP {
       return {
         confirmOpen: !!(m && !m.hidden),
         title: (document.getElementById('avatarConfirmTitle')||{}).textContent || '',
-        previewImg: prev ? prev.style.backgroundImage || '' : '',
+        previewImg: prev ? ((prev.querySelector('img')||{}).src || '') : '',
         previewText: prev ? prev.textContent : '',
-        uploadThumb: up ? up.style.backgroundImage || '' : '',
+        uploadThumb: up ? ((up.querySelector('img')||{}).src || '') : '',
         pickedLen: (window.ChatApp.state.pickedImageData || '').length,
       };
     })()`);
     check('弹出了确认框', afterPick.confirmOpen === true);
     check('标题是「是否确定修改？」', /是否确定修改/.test(afterPick.title), afterPick.title);
-    check('确认框预览显示的是图片', /^url\(/.test(afterPick.previewImg), afterPick.previewImg.slice(0, 40));
-    check('上传区也有缩略图', /^url\(/.test(afterPick.uploadThumb), afterPick.uploadThumb.slice(0, 40));
+    check('确认框预览显示的是图片', afterPick.previewImg.indexOf('data:image/png') === 0, afterPick.previewImg.slice(0, 40));
+    check('上传区也有缩略图', afterPick.uploadThumb.indexOf('data:image/png') === 0, afterPick.uploadThumb.slice(0, 40));
     check('图片已经读进内存了', afterPick.pickedLen > 100, `${afterPick.pickedLen} 字符`);
     check('预览里没有残留文字', afterPick.previewText === '', `"${afterPick.previewText}"`);
 
@@ -245,28 +245,28 @@ class CDP {
       var av = document.getElementById('meAvatar');
       return {
         avatar: window.ChatApp.state.self.avatar,
-        bgImage: av.style.backgroundImage || '',
+        bgImage: ((av.querySelector('img')||{}).src || ''),
         dataImg: av.getAttribute('data-img'),
         confirmOpen: !document.getElementById('avatarConfirm').hidden,
         pickerOpen: !document.getElementById('avatarModal').hidden,
       };
     })()`);
     check('头像文件名字有了', /^[0-9a-f]{16}\.png$/.test(after.avatar || ''), after.avatar);
-    check('侧栏头像铺上了图片', /^url\(/.test(after.bgImage), after.bgImage.slice(0, 50));
+    check('侧栏头像铺上了图片', after.bgImage.indexOf('/avatar/') >= 0, after.bgImage.slice(0, 60));
     check('标记成图片头像', after.dataImg === '1', after.dataImg);
     check('两个弹窗都关掉了', after.confirmOpen === false && after.pickerOpen === false);
 
     console.log('\n[5] 图片真的能加载出来（不是裂图）');
     const imgOk = await cdp.evaluate(`(function(){
       var av = document.getElementById('meAvatar');
-      var bg = av.style.backgroundImage;
-      if (!bg || bg === 'none') return Promise.resolve({ok:false, why:'没有背景图'});
-      var url = bg.slice(5, -2).replace(/^["']|["']$/g, '');
-      return fetch(url).then(function(r){
+      var im = av.querySelector('img');
+      if (!im) return Promise.resolve({ok:false, why:'没有 img 元素'});
+      return fetch(im.src).then(function(r){
         return r.blob().then(function(b){
-          return {ok: r.status === 200 && b.type === 'image/png', status: r.status, type: b.type, size: b.size};
+          return {ok: r.status === 200 && b.type === 'image/png', status: r.status, type: b.type,
+                  size: b.size, src: im.src, naturalW: im.naturalWidth};
         });
-      }).catch(function(e){ return {ok:false, why:String(e)}; });
+      }).catch(function(e){ return {ok:false, why:String(e), src: im.src}; });
     })()`);
     check('图片能正常加载', imgOk.ok === true, JSON.stringify(imgOk));
 
@@ -285,14 +285,32 @@ class CDP {
       return {
         avatar: window.ChatApp.state.self.avatar,
         name: window.ChatApp.state.self.name,
-        bgImage: av.style.backgroundImage || '',
+        bgImage: ((av.querySelector('img')||{}).src || ''),
       };
     })()`);
     check('刷新后图片头像还在', afterReload.avatar === after.avatar,
       `${afterReload.avatar} vs ${after.avatar}`);
     check('刷新后名字也没变', afterReload.name === selfObj.name,
       `${afterReload.name} vs ${selfObj.name}`);
-    check('刷新后侧栏头像还是图片', /^url\(/.test(afterReload.bgImage), afterReload.bgImage.slice(0, 50));
+    check('刷新后侧栏头像还是图片', afterReload.bgImage.indexOf('/avatar/') >= 0, afterReload.bgImage.slice(0, 60));
+
+    console.log('\n[7] 图片加载失败时退回字母头像（不能变成空白圆）');
+    // 模拟「口令轮换了 / 文件没了」→ 图片加载失败
+    const fallback = await cdp.evaluate(`(function(){
+      var av = document.getElementById('meAvatar');
+      var im = av.querySelector('img');
+      if (!im) return Promise.resolve({ok:false, why:'没有 img 元素'});
+      im.onerror();
+      return Promise.resolve({
+        hasImg: !!av.querySelector('img'),
+        dataImg: av.getAttribute('data-img'),
+        text: av.textContent,
+        bg: av.style.background || '',
+      });
+    })()`);
+    check('失败的图片被移除', fallback.hasImg === false);
+    check('退回字母头像', (fallback.text || '').length > 0, `"${fallback.text}"`);
+    check('底色也补回来了', /rgb|#[0-9a-f]{6}/i.test(fallback.bg), fallback.bg);
 
   } catch (err) {
     fail++;
