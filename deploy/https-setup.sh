@@ -96,8 +96,23 @@ say ""
 say "[1/6] 安装 Nginx 与 acme.sh ..."
 
 if ! command -v nginx >/dev/null 2>&1; then
+  # Ubuntu 的 unattended-upgrade 会占着 dpkg 锁，导致 apt 装不上。
+  # 先等锁释放（最多 120 秒），再重试。
   if command -v apt-get >/dev/null 2>&1; then
-    (apt-get update -qq && apt-get install -y -qq nginx cron) >/dev/null 2>&1 || true
+    if command -v fuser >/dev/null 2>&1; then
+      LOCK_HOLDER=$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null | tr -d ' ' || true)
+      if [ -n "$LOCK_HOLDER" ]; then
+        say "      ${C_Y}dpkg 锁被进程 ${LOCK_HOLDER} 占用，等待释放 ...${C_0}"
+        for _ in $(seq 1 24); do
+          sleep 5
+          if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+            say "      锁已释放，继续安装"
+            break
+          fi
+        done
+      fi
+    fi
+    (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx cron) >/dev/null 2>&1 || true
   else
     (yum install -y -q nginx cronie) >/dev/null 2>&1 || true
   fi
@@ -107,7 +122,6 @@ if ! command -v nginx >/dev/null 2>&1; then
   say "${C_R}[ERROR] Nginx 装不上${C_0}"
   exit 1
 fi
-
 # cron：acme.sh 靠它自动续期。精简镜像常常没装。
 if ! command -v crontab >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
@@ -148,13 +162,25 @@ say "[2/6] 探测公网 IP ..."
 
 if [ -z "$PUB_IP" ]; then
   # 阿里云元数据最可靠
+  # ⚠️ 每级都必须做 IP 格式校验：元数据里不存在的路径（如本机的 public-ipv4）
+  # 会返回 404 的 HTML 错误页，不校验就会把整段 XML 当成 IP。
+  is_valid_ip() {
+    echo "$1" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
+  }
   for META_PATH in public-ipv4 eipv4; do
     if [ -z "$PUB_IP" ]; then
-      PUB_IP=$(curl -s -m 3 "http://100.100.100.200/latest/meta-data/${META_PATH}" 2>/dev/null || true)
+      CAND=$(curl -s -m 3 "http://100.100.100.200/latest/meta-data/${META_PATH}" 2>/dev/null | tr -d '\r\n' || true)
+      is_valid_ip "$CAND" && PUB_IP="$CAND"
     fi
   done
-  [ -z "$PUB_IP" ] && PUB_IP=$(curl -s -m 5 https://api.ipify.org 2>/dev/null || true)
-  [ -z "$PUB_IP" ] && PUB_IP=$(curl -s -m 5 http://ifconfig.me/ip 2>/dev/null || true)
+  if [ -z "$PUB_IP" ]; then
+    CAND=$(curl -s -m 5 https://api.ipify.org 2>/dev/null | tr -d '\r\n' || true)
+    is_valid_ip "$CAND" && PUB_IP="$CAND"
+  fi
+  if [ -z "$PUB_IP" ]; then
+    CAND=$(curl -s -m 5 http://ifconfig.me/ip 2>/dev/null | tr -d '\r\n' || true)
+    is_valid_ip "$CAND" && PUB_IP="$CAND"
+  fi
   if [ -z "$PUB_IP" ]; then
     PUB_IP=$(ip -4 addr show scope global 2>/dev/null \
       | grep -oE 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \

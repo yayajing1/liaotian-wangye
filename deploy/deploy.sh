@@ -542,14 +542,31 @@ fi
 # 2) ipify.org
 # 3) ifconfig.me
 # 4) 本机网卡地址兜底（拿不到公网 IP 时至少能看个大概）
+#
+# ⚠️ 关键：每个来源的结果都必须通过 IP 格式校验才采纳。
+# 阿里云元数据里不存在的路径（如本机的 public-ipv4）会返回 404 的 HTML 错误页，
+# 若不校验就会把整段 XML 当成 IP 打印出来。
+is_valid_ip() {
+  echo "$1" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
+}
+
 PUB_IP=""
 for META_PATH in public-ipv4 eipv4; do
   if [ -z "$PUB_IP" ]; then
-    PUB_IP=$(curl -s -m 3 "http://100.100.100.200/latest/meta-data/${META_PATH}" 2>/dev/null || true)
+    CAND=$(curl -s -m 3 "http://100.100.100.200/latest/meta-data/${META_PATH}" 2>/dev/null | tr -d '\r\n' || true)
+    if is_valid_ip "$CAND"; then
+      PUB_IP="$CAND"
+    fi
   fi
 done
-[ -z "$PUB_IP" ] && PUB_IP=$(curl -s -m 5 https://api.ipify.org 2>/dev/null || true)
-[ -z "$PUB_IP" ] && PUB_IP=$(curl -s -m 5 http://ifconfig.me/ip 2>/dev/null || true)
+if [ -z "$PUB_IP" ]; then
+  CAND=$(curl -s -m 5 https://api.ipify.org 2>/dev/null | tr -d '\r\n' || true)
+  is_valid_ip "$CAND" && PUB_IP="$CAND"
+fi
+if [ -z "$PUB_IP" ]; then
+  CAND=$(curl -s -m 5 http://ifconfig.me/ip 2>/dev/null | tr -d '\r\n' || true)
+  is_valid_ip "$CAND" && PUB_IP="$CAND"
+fi
 if [ -z "$PUB_IP" ]; then
   PUB_IP=$(ip -4 addr show scope global 2>/dev/null \
     | grep -oE 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
