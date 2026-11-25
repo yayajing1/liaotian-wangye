@@ -132,18 +132,32 @@ async function waitFor(events, pred, timeout = 12000) {
  *
  * 测试跑在线上服务上，不清理的话成员列表里会多出一堆「测试用户」，
  * 历史消息里也会多出「来自 A 的公网测试消息」。
+ *
+ * ⚠️ 只能清「本机」的库 —— 如果测试打的是远端服务器（比如 wss://8.222.185.143/ws），
+ *    本地的 data/chat.db 里根本没有这些用户，删了也是 0 条。
+ *    这时候必须明确告诉人「远端还留着，要手动删」，
+ *    千万别打印一句「已清除」就完事 —— 那会让人以为线上是干净的，
+ *    其实成员列表里还挂着两个测试用户。
  */
 function cleanup() {
   if (!createdUserIds.size) return;
+  const ids = [...createdUserIds];
   try {
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(path.join(ROOT, 'data', 'chat.db'));
-    const ids = [...createdUserIds];
     const marks = ids.map(() => '?').join(',');
     const msgs = db.prepare(`DELETE FROM messages WHERE sender_id IN (${marks})`).run(...ids).changes;
     const users = db.prepare(`DELETE FROM users WHERE id IN (${marks})`).run(...ids).changes;
     db.close();
-    console.log(`\n[cleanup] 已清除测试数据：${msgs} 条消息 / ${users} 个用户`);
+    if (users > 0 || msgs > 0) {
+      console.log(`\n[cleanup] 已清除测试数据：${msgs} 条消息 / ${users} 个用户`);
+    } else {
+      console.log(`\n[cleanup] ⚠️ 本机库里没找到这些用户 —— 说明测试打的是**远端**服务器，`);
+      console.log(`         远端的成员列表里还留着这几个测试用户，需要手动删：`);
+      for (const id of ids) console.log(`           DELETE FROM users   WHERE id = '${id}';`);
+      console.log(`           DELETE FROM messages WHERE sender_id = '<上面这些 id>';`);
+      console.log(`           DELETE FROM user_devices WHERE user_id = '<上面这些 id>';`);
+    }
   } catch (err) {
     console.log(`\n[cleanup] 清除测试数据失败：${err.message}`);
   }
