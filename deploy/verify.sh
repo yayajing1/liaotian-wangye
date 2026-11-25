@@ -158,7 +158,7 @@ if [ -s "$SSL_DIR/fullchain.pem" ] && [ -s "$SSL_DIR/privkey.pem" ]; then
       bad "证书里没有 ${DOMAIN}：$SAN —— 跑 https-setup.sh --domain ${DOMAIN} 重签"
       FAIL=1
     fi
-  elif echo "$SAN" | grep -q "IP Address"; then
+  elif echo "$SAN" | grep -qiE "IP ?Address|IPAddress"; then
     ok "证书签发对象是 IP：$SAN"
   else
     warn "证书 SAN 不是 IP 地址：$SAN"
@@ -199,19 +199,58 @@ if command -v curl >/dev/null 2>&1; then
   fi
 
   # WebSocket 升级 —— 不带口令，应被拒绝（说明门禁和 WS 通路都正常）
-  WS_OUT=$(curl -s -i -N --max-time 8 \
-    -H "Connection: Upgrade" -H "Upgrade: websocket" \
-    -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
-    "https://127.0.0.1/ws" 2>/dev/null | head -20 || true)
-  if echo "$WS_OUT" | grep -q "101"; then
-    warn "WebSocket 握手返回 101 —— 不带口令居然连上了？检查口令校验"
-    FAIL=1
-  elif echo "$WS_OUT" | grep -q "bad_key"; then
-    ok "WebSocket 升级正常，且口令门禁生效（bad_key）✓"
-  elif echo "$WS_OUT" | grep -qi "upgrade"; then
-    ok "WebSocket 握手有响应（升级头已透传）✓"
+  #
+  # ⚠️ 用真正的 WebSocket 客户端测，而不是 curl。
+  # curl 拿到的是二进制帧，grep 不到 "bad_key" 字符串，会误报「握手没响应」。
+  # 服务器上有 Node（项目依赖里有 ws），直接用 node 测最准。
+  WS_CHECK_SCRIPT='
+const url = process.argv[1];
+const WebSocket = require("ws");
+const w = new WebSocket(url, { rejectUnauthorized: false });
+let done = false;
+const finish = (code) => { if (done) return; done = true; try { w.terminate(); } catch (e) {} process.exit(code); };
+w.on("open", () => { console.log("OPEN_UNEXPECTED"); finish(2); });
+w.on("message", (d) => {
+  const s = d.toString();
+  if (s.indexOf("bad_key") >= 0) { console.log("BAD_KEY_OK"); finish(0); }
+  else { console.log("OTHER:" + s.slice(0, 80)); finish(3); }
+});
+w.on("error", (e) => { console.log("ERR:" + (e && e.message)); finish(4); });
+setTimeout(() => { console.log("TIMEOUT"); finish(5); }, 8000);
+'
+
+  NODE_BIN="$(command -v node || echo /usr/local/bin/node)"
+  if [ -x "$NODE_BIN" ] && [ -d "$APP_DIR/node_modules/ws" ]; then
+    WS_PROBE=$(cd "$APP_DIR" && WS_TMP="$(mktemp /tmp/wsprobe-XXXXXX.js)" && printf '%s' "$WS_CHECK_SCRIPT" > "$WS_TMP" \
+      && "$NODE_BIN" "$WS_TMP" "wss://127.0.0.1/ws?key=__probe__&cid=verify-probe" 2>&1 \
+      | head -3; rm -f "$WS_TMP" 2>/dev/null || true)
+    case "$WS_PROBE" in
+      *BAD_KEY_OK*)
+        ok "WebSocket 升级正常，且口令门禁生效（bad_key）✓" ;;
+      *OPEN_UNEXPECTED*)
+        warn "WebSocket 不带口令就连上了 —— 检查口令校验"
+        FAIL=1 ;;
+      *TIMEOUT*)
+        warn "WebSocket 连接超时 —— 检查 Nginx 的 location /ws 配置" ;;
+      *ERR:*)
+        warn "WebSocket 连接失败 —— ${WS_PROBE}" ;;
+      *)
+        warn "WebSocket 探测无有效结果：${WS_PROBE}" ;;
+    esac
   else
-    warn "WebSocket 握手没响应 —— 检查 Nginx 的 location /ws 配置"
+    # 退化路径：没有 node/ws 时退回 curl 握手检查
+    WS_OUT=$(curl -s -i -N --max-time 8 \
+      -H "Connection: Upgrade" -H "Upgrade: websocket" \
+      -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: x3JJHMbDL1EzLkh9GBhXDw==" \
+      "https://127.0.0.1/ws" 2>/dev/null | head -20 || true)
+    if echo "$WS_OUT" | grep -q "101"; then
+      warn "WebSocket 握手返回 101 —— 不带口令居然连上了？检查口令校验"
+      FAIL=1
+    elif echo "$WS_OUT" | grep -qi "upgrade\|bad_key"; then
+      ok "WebSocket 握手有响应（升级头已透传）✓"
+    else
+      info "无法确定 WebSocket 状态（缺少 node/ws 客户端，仅提示）"
+    fi
   fi
 else
   warn "没有 curl，跳过功能自测"
