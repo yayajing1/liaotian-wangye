@@ -64,6 +64,30 @@ const db = new DatabaseSync(path.join(DATA_DIR, 'chat.db'));
  */
 const ROOM_KEY = loadRoomKey();
 
+/**
+ * 口令字符集：故意去掉 0/O、1/l/I 这些"长得太像"的字符。
+ *
+ * 踩过的坑：原来的口令是十六进制，人工从聊天记录往手机里誊的时候，
+ * 一眼看错就把 1 当成 l、把 b 当成 6，服务端直接判定"口令不正确"，
+ * 对方反复弹框也进不来。字符集里根本没有这些字符，就从根上杜绝。
+ */
+const KEY_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+
+/** 生成一个不含易混淆字符的房间口令 */
+function generateRoomKey(len = 16) {
+  const max = Math.floor(256 / KEY_ALPHABET.length) * KEY_ALPHABET.length;
+  let out = '';
+  while (out.length < len) {
+    const buf = crypto.randomBytes(len * 2);
+    for (const b of buf) {
+      if (b >= max) continue;                 // 丢弃有偏置的取值
+      out += KEY_ALPHABET[b % KEY_ALPHABET.length];
+      if (out.length === len) break;
+    }
+  }
+  return out;
+}
+
 function loadRoomKey() {
   const fromEnv = process.env.ROOM_KEY;
   if (fromEnv !== undefined) return String(fromEnv).trim();   // 空串 = 公开房间
@@ -74,17 +98,34 @@ function loadRoomKey() {
     if (saved) return saved;
   } catch { /* 文件还没有，下面生成 */ }
 
-  const key = crypto.randomBytes(6).toString('hex');   // 12 位十六进制
+  const key = generateRoomKey();
   try { fs.writeFileSync(file, key, 'utf8'); } catch { /* 只读文件系统也不影响运行 */ }
   console.log(`[room] 已生成新房间口令：${key}`);
   return key;
 }
 
+/**
+ * 口令归一化。
+ *
+ * 手机上把口令敲对很难，一个字符的"脏"就足以让它变成错的：
+ *   - 首尾空格 / 换行（复制时带上的）
+ *   - 全角字符（中文输入法下的 ａｂｃ、０９）
+ *   - 大小写（手机键盘把首字母自动大写了）
+ *   - 中间被插入的空格
+ * 这些都不是用户本意，一律在比对前抹平。
+ */
+function normalizeKey(raw) {
+  return String(raw === undefined || raw === null ? '' : raw)
+    .normalize('NFKC')          // 全角 → 半角
+    .replace(/\s+/g, '')        // 去掉所有空白
+    .toLowerCase();
+}
+
 /** 定长比较，避免用时序差异泄漏口令 */
 function keyMatches(given) {
   if (!ROOM_KEY) return true;                       // 公开房间，不校验
-  const a = Buffer.from(String(given || ''));
-  const b = Buffer.from(ROOM_KEY);
+  const a = Buffer.from(normalizeKey(given), 'utf8');
+  const b = Buffer.from(normalizeKey(ROOM_KEY), 'utf8');
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
@@ -640,7 +681,10 @@ wss.on('connection', (ws, req) => {
 
   if (process.env.WS_DEBUG) {
     const ua = String(req.headers['user-agent'] || '').slice(0, 40);
-    console.log(`[ws] url=${req.url} key=${JSON.stringify(roomKey)} len=${roomKey.length} match=${keyMatches(roomKey)} ua=${ua}`);
+    // ⚠️ 不要把口令原文（req.url 里就有）打进日志：
+    //    journalctl 里明文留口令 = 口令等于公开。改成只记长度 + 指纹。
+    const fp = crypto.createHash('sha256').update(normalizeKey(roomKey)).digest('hex').slice(0, 8);
+    console.log(`[ws] key len=${normalizeKey(roomKey).length} fp=${fp} match=${keyMatches(roomKey)} ua=${ua}`);
   }
 
   if (!keyMatches(roomKey)) {

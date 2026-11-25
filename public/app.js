@@ -48,7 +48,9 @@
     ws: null,
     retry: 0,
     lastTypingSent: 0,
-    key: '',           // 房间口令
+    key: '',           // 房间口令（当前正在用的）
+    savedKey: '',      // 本机上次验证通过、记住的口令
+    triedFallback: false, // 链接口令失败后是否已试过回退
     takeover: false,   // 被别的连接顶替了，等用户点「重新进入」
   };
 
@@ -79,35 +81,42 @@
   const KEY_STORE = 'chat_room_key';
 
   /**
-   * 取房间口令。
-   *
-   * 优先用链接里带的（?key=xxx 或 #key=xxx），
-   * 这样把整条链接发给朋友，他一点就进来了 —— 不用手输。
-   * 其次向服务端要：本机直接访问时服务端会给（/api/room-key），
-   * 公网隧道过来的请求拿不到，所以朋友必须用带口令的链接。
-   * 最后退回上次记住的（localStorage）。
+   * 口令归一化 —— 必须和服务端 server.js 里的 normalizeKey 一致。
+   * 全角转半角、去掉所有空白、忽略大小写。
+   * 手机输入法很容易在"看起来对"的口令里塞进一个全角空格或者把首字母大写，
+   * 不归一化就会变成"口令不正确"。
    */
-  function getRoomKey() {
-    // ⚠️ 分两步走，不要把「读 URL」和「读 localStorage」包在同一个 try 里。
-    // localStorage 在部分环境（微信内置浏览器的某些模式、无痕窗口、
-    // 存储被禁用时）会直接抛异常；原来一个 catch 把整个函数兜住，
-    // 结果**已经从链接里读到的正确口令也被一起抹成空**，
-    // 客户端就会拿着空口令去连 → 服务端拒绝 → 弹窗 → 用户重新输。
-    let key = '';
-    try {
-      key = new URLSearchParams(location.search).get('key') || '';
-      if (!key && location.hash) {
-        key = new URLSearchParams(location.hash.replace(/^#/, '')).get('key') || '';
-      }
-    } catch { key = ''; }
+  function normalizeKey(raw) {
+    return String(raw === undefined || raw === null ? '' : raw)
+      .normalize('NFKC')
+      .replace(/\s+/g, '')
+      .toLowerCase();
+  }
 
-    if (!key) {
-      try { key = localStorage.getItem(KEY_STORE) || ''; } catch { key = ''; }
-    }
-    if (key) {
-      try { localStorage.setItem(KEY_STORE, key); } catch { /* ignore */ }
-    }
-    return key;
+  /**
+   * 读口令 —— 分成两份，互不覆盖。
+   *
+   *   urlKey   链接里带的（?key=xxx 或 #key=xxx）
+   *   savedKey 本机上次**验证通过**、记住的
+   *
+   * 之前只有一个变量：先读链接，读不到才读 localStorage，
+   * 而且读到链接里那份就立刻写进 localStorage。
+   * 结果链接里那份只要错一位（人工誊写时看错 l/1、0/O），
+   * 就会把本机本来正确的那份也一起顶掉，用户只能干瞪眼。
+   */
+  function readKeys() {
+    let urlKey = '';
+    try {
+      urlKey = new URLSearchParams(location.search).get('key') || '';
+      if (!urlKey && location.hash) {
+        urlKey = new URLSearchParams(location.hash.replace(/^#/, '')).get('key') || '';
+      }
+    } catch { urlKey = ''; }
+
+    let savedKey = '';
+    try { savedKey = localStorage.getItem(KEY_STORE) || ''; } catch { savedKey = ''; }
+
+    return { urlKey: normalizeKey(urlKey), savedKey: normalizeKey(savedKey) };
   }
 
   /**
@@ -121,8 +130,7 @@
       const res = await fetch('/api/room-key', { cache: 'no-store' });
       if (!res.ok) return '';
       const data = await res.json();
-      const key = String((data && data.key) || '');
-      if (key) { try { localStorage.setItem(KEY_STORE, key); } catch { /* ignore */ } }
+      const key = normalizeKey((data && data.key) || '');
       return key;
     } catch {
       return '';
@@ -133,6 +141,26 @@
     try {
       if (key) localStorage.setItem(KEY_STORE, key);
       else localStorage.removeItem(KEY_STORE);
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * 把链接里的口令就地改成"能用的那一个"。
+   *
+   * 场景：链接里那份口令被看错了一位，用户手动输对了。
+   * 这时地址栏里还挂着错的那份 —— 一刷新就又被拒一次。
+   * 就地改掉，刷新、重发链接都不用再折腾。
+   * 链接里本来就没有口令的话不动它（别擅自往地址栏里塞口令）。
+   */
+  function syncKeyInUrl(key) {
+    try {
+      const u = new URL(location.href);
+      const inQuery = u.searchParams.has('key');
+      const inHash = /(^|[#&])key=/.test(u.hash || '');
+      if (inQuery) u.searchParams.set('key', key);
+      else if (inHash) u.hash = u.hash.replace(/key=[^&]*/, 'key=' + key);
+      else return;
+      history.replaceState(null, '', u.toString());
     } catch { /* ignore */ }
   }
 
@@ -228,10 +256,23 @@
     };
 
     ws.onclose = (evt) => {
-      // 口令不对：别再傻等重连了，弹框让人输口令
+      // 口令不对：先别急着重连
       if (evt.code === 4001) {
+        // 链接里那份口令可能是誊写时看错了一位。
+        // 如果本机还存着一把验证通过的口令，先拿它自动重试一次，
+        // 免得用户明明有正确口令却还要再输一遍。
+        if (state.savedKey && state.savedKey !== state.key && !state.triedFallback) {
+          state.triedFallback = true;
+          state.key = state.savedKey;
+          closeKeyModal();          // 别让弹窗杵在这儿挡着
+          setConn('口令不对，正在用上次通过的口令重试…', false);
+          connect();
+          return;
+        }
         setConn('房间口令不正确', false);
-        askRoomKey('口令不对，请重新输入。');
+        askRoomKey(`口令不对。刚才试的是「${state.key || '（空）'}」，`
+          + '请核对是不是有一位看错了 —— 可以点「粘贴」重新贴一次，'
+          + '或直接从聊天记录里重新复制整条链接。');
         return;
       }
       // 被同一浏览器的另一个连接顶替（刷新 / 开了两个标签页）
@@ -263,9 +304,11 @@
   function askRoomKey(reason) {
     if (el.keyModal.hidden) {
       el.keyModal.hidden = false;
-      el.keyInput.value = state.key || '';
+      // 不要预填上次那个（多半是错的）—— 留着只会让人以为是正确的，
+      // 直接清空、聚焦，让用户从聊天记录里重新复制/粘贴一遍。
+      el.keyInput.value = '';
       updateKeyLen();
-      setTimeout(() => { try { el.keyInput.focus(); el.keyInput.select(); } catch { /* ignore */ } }, 30);
+      setTimeout(() => { try { el.keyInput.focus(); } catch { /* ignore */ } }, 30);
     }
     if (reason) {
       el.keyErr.hidden = false;
@@ -284,13 +327,13 @@
   }
 
   function submitRoomKey() {
-    const key = String(el.keyInput.value || '').trim();
+    const key = normalizeKey(el.keyInput.value);
     if (!key) {
       el.keyErr.hidden = false;
       el.keyErr.textContent = '口令不能为空。';
       return;
     }
-    setRoomKey(key);
+    state.triedFallback = false;
     state.key = key;
     closeKeyModal();
     connect();
@@ -302,13 +345,20 @@
         // 服务端拒绝了我们（目前只有「口令不对」这一种）
         setConn(data.msg || '出错了', false);
         if (data.code === 'bad_key') {
-          const n = String(state.key || '').trim().length;
-          askRoomKey(`口令不对。你刚才输入的是 ${n} 位，请检查是否漏了字符（可以用「粘贴」按钮）。`);
+          askRoomKey('口令不对。请核对是不是有一位看错了 —— '
+            + '可以点「粘贴」重新贴一次，或从聊天记录里重新复制整条链接。');
         }
         break;
       }
 
       case 'init': {
+        // 进来了 → 这把口令确认是对的，这时才记下来。
+        // （之前是把"链接里读到的"直接存，那份可能是错的，等于把好口令也弄丢了）
+        setRoomKey(state.key);
+        state.savedKey = state.key;
+        // 链接里那份如果是错的，就地改成对的那份
+        syncKeyInUrl(state.key);
+        closeKeyModal();            // 进来了就把弹窗收掉
         state.self = data.self;
         state.users = new Map(data.users.map((u) => [u.id, u]));
         state.hasMore = !!data.hasMore;
@@ -756,12 +806,23 @@
   updateTitle();
 
   // 先把口令准备好再连：
-  //   链接里带了 → 直接用（朋友点分享链接就是这条路）
-  //   本机访问   → 问服务端要（只有本机直连才给）
-  //   都没有     → 先空着连，被拒了再弹框问
+  //   链接里带了   → 直接用（朋友点分享链接就是这条路）
+  //   本机访问     → 问服务端要（只有本机直连才给）
+  //   都没有       → 先空着连，被拒了再弹框问
   (async () => {
-    state.key = getRoomKey();
-    if (!state.key) state.key = await fetchLocalKey();
+    const { urlKey, savedKey } = readKeys();
+    state.savedKey = savedKey;
+    state.key = urlKey || savedKey;
+
+    if (!state.key) {
+      // 本机直连的话，服务端会给口令
+      const local = await fetchLocalKey();
+      if (local) {
+        state.key = local;
+        state.savedKey = local;
+      }
+    }
+
     if (!state.key) {
       // 没有口令就别先连一次被拒了 —— 直接弹窗，省一次往返
       setConn('需要房间口令', false);

@@ -178,6 +178,30 @@ function fetchRoomKey(hostHeader) {
     check('公网 Host 拿不到口令', viaTunnel.status === 403, `status=${viaTunnel.status}`);
     const lanHost = await fetchRoomKey('192.168.1.50:8806');
     check('非本机 Host 也拿不到', lanHost.status === 403, `status=${lanHost.status}`);
+
+    // 手机上把口令敲对很容易"看着对其实不对"，服务端必须 tolerant。
+    // 真实踩过的坑：人工誊写时把 1 看成 l、把 0 看成 o，
+    // 对方被反复弹框却怎么也进不来。
+    console.log('\n[7] 口令的"脏字符"要能自动归一化');
+    const fullWidth = ROOM_KEY.replace(/[!-~]/g, (c) =>
+      String.fromCharCode(c.charCodeAt(0) + 0xFEE0));
+    const upper = ROOM_KEY.toUpperCase();
+    const spaced = ' ' + ROOM_KEY + ' ';
+    const broken = ROOM_KEY.slice(0, 3) + ' ' + ROOM_KEY.slice(3);
+
+    const variants = [
+      ['全角字符（中文输入法）', fullWidth],
+      ['全大写（键盘自动大写）', upper],
+      ['前后带空格', spaced],
+      ['中间带空格', broken],
+    ];
+    for (const [label, variant] of variants) {
+      const r = await tryConnect(variant, 'rk-norm-' + label);
+      check(`${label} 也能进`, r.ok, r.ok ? `昵称=${r.self.name}` : `code=${r.code}`);
+    }
+
+    const stillBad = await tryConnect(ROOM_KEY.slice(0, -1) + 'x', 'rk-norm-bad');
+    check('真的写错了仍然被拒', !stillBad.ok, `code=${stillBad.code}`);
   } finally {
     openSockets.forEach((ws) => { try { ws.close(); } catch { /* ignore */ } });
     try { server.kill(); } catch { /* ignore */ }
