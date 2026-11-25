@@ -1,0 +1,3 @@
+const WebSocket=require('ws');
+function t(key){return new Promise(res=>{const ws=new WebSocket(`wss://8.222.185.143/ws?cid=c-${Date.now()}-${Math.random().toString(36).slice(2,7)}&key=${encodeURIComponent(key)}`);const to=setTimeout(()=>{console.log('TIMEOUT '+key);res();},9000);ws.on('message',r=>{const d=JSON.parse(r.toString());if(d.t==='init'){clearTimeout(to);console.log('✅ 接受  '+key+'  → 昵称='+d.self.name);ws.close();res();}if(d.t==='error'){clearTimeout(to);console.log('❌ 拒绝  '+key+'  ('+d.msg+')');ws.close();res();}});ws.on('error',e=>{clearTimeout(to);console.log('ERR '+key+' '+e.message);res();});});}
+(async()=>{await t(process.argv[2]);await t(process.argv[3]);await t('totally-wrong-key');})();

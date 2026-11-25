@@ -37,11 +37,21 @@ fi
 
 LINK="$BASE_URL#key=$KEY"
 
+# 备用口令（如果服务端配了 ROOM_KEY_SPARE）—— 主口令那版失效时的备选链接
+SPARE=""
+if [ -n "${ROOM_KEY_SPARE:-}" ]; then
+  SPARE="$BASE_URL#key=$ROOM_KEY_SPARE"
+elif [ -r "$APP_DIR/data/room.key.spare" ]; then
+  SPARE_KEY=$(tr -d '\r\n' < "$APP_DIR/data/room.key.spare")
+  [ -n "$SPARE_KEY" ] && SPARE="$BASE_URL#key=$SPARE_KEY"
+fi
+
 cat <<EOF
 ────────────────────────────────────────────
   房间链接（直接复制这一行，别手敲）
 ────────────────────────────────────────────
 $LINK
+$( [ -n "$SPARE" ] && printf '备用链接：%s\n' "$SPARE" )
 
   配套话术（可直接转发）
 ────────────────────────────────────────────
