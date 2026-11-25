@@ -77,11 +77,24 @@
     </div>
   </div>
 
-  <!-- 换头像：先选颜色，改之前再问一次「是否确定修改」 -->
+  <!-- 换头像：可以从相册选图，也可以挑颜色；改之前都会再问一次「是否确定修改」 -->
   <div class="modal-mask" id="avatarModal" hidden>
     <div class="modal modal-avatar" role="dialog" aria-modal="true" aria-labelledby="avatarModalTitle">
-      <h2 class="modal-title" id="avatarModalTitle">更换头像颜色</h2>
-      <p class="modal-desc">挑一个颜色点一下，改之前会再问你一次。</p>
+      <h2 class="modal-title" id="avatarModalTitle">修改头像</h2>
+      <p class="modal-desc">从相册选一张，或挑一个颜色。改之前会再问你一次。</p>
+
+      <!-- 从相册选图 -->
+      <label class="avatar-upload" for="avatarFile">
+        <input type="file" id="avatarFile" accept="image/*" hidden>
+        <span class="avatar-upload-preview" id="avatarUploadPreview">＋</span>
+        <span class="avatar-upload-text">
+          <b>从相册选择图片</b>
+          <i>会自动裁成方形并压缩</i>
+        </span>
+      </label>
+
+      <div class="modal-sep"><span>或者挑一个颜色</span></div>
+
       <div class="color-grid" id="colorGrid"></div>
       <div class="modal-actions">
         <button type="button" class="modal-btn" id="avatarCancel">取消</button>

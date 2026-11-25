@@ -39,6 +39,23 @@ const PAGE_SIZE = 50;
 // 只针对「颜色」计时，不影响改名（改名走原来的逻辑，一行没动）。
 const COLOR_COOLDOWN_MS = Number(process.env.COLOR_COOLDOWN_MS) || 1000;
 
+// ---- 图片头像 ----
+//
+// 用户可以从手机相册里挑一张图当头像。图片走「上传 → 存文件 → 引用 token」的模式：
+//   1. 客户端用 canvas 把图片居中裁剪成 128×128 的 PNG，base64 后发给服务端
+//   2. 服务端校验大小和文件头，存到 data/avatars/<token>.png
+//   3. users.avatar 只存 token（比如 "a1b2c3d4"）
+//   4. 别人渲染头像时请求 /avatar/<token>.png
+//
+// 为什么存文件而不是塞进数据库：
+//   - 图片是二进制大块，混在聊天库里会让备份/清理逻辑变复杂
+//   - 单独目录可以直接被 backup.sh 打包迁移
+const AVATAR_DIR = path.join(DATA_DIR, 'avatars');
+const AVATAR_SIZE = 128;                        // 边长（像素）
+const MAX_AVATAR_BYTES = 256 * 1024;            // 单张上限 256KB（base64 解码后）
+const MAX_AVATAR_B64 = Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 16;
+const AVATAR_COOLDOWN_MS = Number(process.env.AVATAR_COOLDOWN_MS) || 3000;
+
 // 消息保留 7 天，定时清理
 // 保留期和清理间隔都做成环境变量可调 —— 测试里用小值快速验证
 // 「消息过期 → 用户行被清理 → 昵称释放」这条链路。
@@ -51,6 +68,7 @@ const CLEANUP_INTERVAL_MS = Number(process.env.CLEANUP_INTERVAL_MS) || 60 * 60 *
 /* ================================================================== */
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(AVATAR_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, 'chat.db'));
 
 /* ================================================================== */
@@ -234,6 +252,13 @@ if (!userCols.includes('client_id')) {
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_client ON users(client_id)');
 
+// 图片头像：存的是 data/avatars/ 下的文件名（token.png），
+// 为空表示用「颜色底 + 昵称首字」那种默认头像。
+// 加这列是为了让「换过的头像」在刷新、重连、换设备后都还在。
+if (!userCols.includes('avatar')) {
+  db.exec('ALTER TABLE users ADD COLUMN avatar TEXT');
+}
+
 const S = {
   // 新用户：纯 INSERT。名字的唯一性由 idx_users_name 唯一索引在存储层兜底
   insertUser: db.prepare(`
@@ -241,31 +266,33 @@ const S = {
     VALUES (?, ?, ?, ?, ?)
   `),
   renameUser: db.prepare('UPDATE users SET name = ?, color = ?, last_seen = ? WHERE id = ?'),
-  getUser: db.prepare('SELECT id, name, color FROM users WHERE id = ?'),
-  findByClient: db.prepare('SELECT id, name, color FROM users WHERE client_id = ?'),
+  // 换图片头像：只改 avatar 字段，不碰昵称和颜色
+  setAvatar: db.prepare('UPDATE users SET avatar = ?, last_seen = ? WHERE id = ?'),
+  getUser: db.prepare('SELECT id, name, color, avatar FROM users WHERE id = ?'),
+  findByClient: db.prepare('SELECT id, name, color, avatar FROM users WHERE client_id = ?'),
   setClient: db.prepare('UPDATE users SET client_id = ?, last_seen = ? WHERE id = ?'),
   // 昵称占用查询：排除自己后，还有没有别人占着这个名字（在线 + 历史一起算）
   takenByName: db.prepare('SELECT COUNT(*) AS c FROM users WHERE name = ? AND id <> ?'),
   // 所有已被占用的昵称（自动分配昵称时避开）
-  listUsers: db.prepare('SELECT id, name, color FROM users'),
+  listUsers: db.prepare('SELECT id, name, color, avatar FROM users'),
   // 在线成员的心跳（防止久不发言的在线用户被清理掉）
   touchUser: db.prepare('UPDATE users SET last_seen = ? WHERE id = ?'),
   insertMsg: db.prepare(
     'INSERT INTO messages (id, sender_id, text, kind, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   ),
   getMsg: db.prepare(`
-    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color
+    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color, u.avatar
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
     WHERE m.id = ?
   `),
   recallMsg: db.prepare("UPDATE messages SET text = '', kind = 'recalled' WHERE id = ?"),
   latest: db.prepare(`
-    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color
+    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color, u.avatar
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
     ORDER BY m.created_at DESC LIMIT ?
   `),
   olderThan: db.prepare(`
-    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color
+    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color, u.avatar
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
     WHERE m.created_at < ?
     ORDER BY m.created_at DESC LIMIT ?
@@ -287,6 +314,7 @@ function toMessage(row) {
       id: row.sender_id,
       name: row.name || '未知用户',
       color: row.color || '#8a929c',
+      avatar: row.avatar || '',
     },
     text: row.text,
     kind: row.kind,
@@ -310,6 +338,10 @@ function cleanupOldData() {
   const removedUsers = S.deleteStaleUsers.run(cutoff).changes;
   if (removed) console.log(`[cleanup] 清理过期消息 ${removed} 条`);
   if (removedUsers) console.log(`[cleanup] 清理过期用户 ${removedUsers} 人（昵称已释放）`);
+
+  // 用户行被删了，他们的图片头像也就没人引用了 —— 一并清掉
+  const orphans = cleanupOrphanAvatars();
+  if (orphans) console.log(`[cleanup] 清理无主头像文件 ${orphans} 个`);
 }
 
 /**
@@ -538,6 +570,7 @@ function createUser() {
     id: crypto.randomUUID(),
     name: pickNickname(),
     color: pickColor(),
+    avatar: '',        // 空 = 用颜色头像
   };
 }
 
@@ -567,7 +600,99 @@ function persistUser(user, now) {
 }
 
 function publicUser(u) {
-  return { id: u.id, name: u.name, color: u.color };
+  // avatar 是图片头像的文件名（token.png），空字符串表示用颜色头像。
+  // 客户端拿到它后会去请求 /avatar/<token>。
+  return { id: u.id, name: u.name, color: u.color, avatar: u.avatar || '' };
+}
+
+/* ================================================================== */
+/* 图片头像                                                            */
+/* ================================================================== */
+
+/**
+ * 校验并保存一张上传的头像图片。
+ *
+ * 客户端用 canvas 把图片裁成 128×128 的 PNG，base64 发过来。
+ * 服务端不信任客户端，所以这里逐项自己验：
+ *
+ *  1. 长度上限 —— base64 不能超过 MAX_AVATAR_B64
+ *  2. 必须是合法的 base64（Buffer 解码不抛错）
+ *  3. 魔数必须是 PNG（\x89PNG\r\n\x1a\n）—— 挡掉伪装成图片的任意二进制
+ *  4. 解码后不能超过 MAX_AVATAR_BYTES
+ *
+ * 通过就落盘成 data/avatars/<token>.png，token 是 8 位随机 hex。
+ * 返回文件名，存进 users.avatar。
+ */
+function saveAvatarImage(b64) {
+  const raw = String(b64 || '');
+  if (!raw) return { ok: false, msg: '没有收到图片' };
+  if (raw.length > MAX_AVATAR_B64) return { ok: false, msg: '图片太大了，换一张小一点的' };
+
+  // 只接受纯 base64（不带 data: 前缀）—— 客户端统一剥掉前缀再发
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) return { ok: false, msg: '图片格式不对' };
+
+  let buf;
+  try {
+    buf = Buffer.from(raw, 'base64');
+  } catch {
+    return { ok: false, msg: '图片格式不对' };
+  }
+  if (!buf.length) return { ok: false, msg: '图片格式不对' };
+  if (buf.length > MAX_AVATAR_BYTES) return { ok: false, msg: '图片太大了，换一张小一点的' };
+
+  // PNG 魔数：89 50 4E 47 0D 0A 1A 0A
+  const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!buf.subarray(0, 8).equals(PNG_MAGIC)) {
+    return { ok: false, msg: '只支持 PNG 图片' };
+  }
+
+  const token = crypto.randomBytes(8).toString('hex');
+  const filename = `${token}.png`;
+  try {
+    fs.writeFileSync(path.join(AVATAR_DIR, filename), buf);
+  } catch {
+    return { ok: false, msg: '保存失败了，稍后再试' };
+  }
+  return { ok: true, filename };
+}
+
+/** 删掉一张头像文件（换掉旧的、或用户行被清理时） */
+function removeAvatarFile(filename) {
+  if (!filename) return;
+  // 只允许我们自己生成的文件名格式 —— 防止路径穿越
+  if (!/^[0-9a-f]{16}\.png$/.test(filename)) return;
+  try {
+    fs.unlinkSync(path.join(AVATAR_DIR, filename));
+  } catch { /* 文件本来就不在，无所谓 */ }
+}
+
+/**
+ * 扫一遍头像目录，把数据库里没人引用的文件删掉。
+ *
+ * 什么时候会留下孤儿文件：
+ *   - 用户换头像时旧文件被覆盖式的替换掉（这个是主动删的）
+ *   - 用户行被清理（7 天无消息）后文件还在
+ * 所以定期扫一次，避免目录无限膨胀。
+ */
+function cleanupOrphanAvatars() {
+  let names;
+  try {
+    names = fs.readdirSync(AVATAR_DIR);
+  } catch {
+    return 0;
+  }
+  const used = new Set(
+    db.prepare("SELECT avatar FROM users WHERE avatar IS NOT NULL AND avatar <> ''").all()
+      .map((r) => r.avatar)
+  );
+  let removed = 0;
+  for (const name of names) {
+    if (!/^[0-9a-f]{16}\.png$/.test(name)) continue;   // 不认识的文件别乱动
+    if (used.has(name)) continue;
+    removeAvatarFile(name);
+    removed++;
+  }
+  return removed;
 }
 
 /* ================================================================== */
@@ -627,6 +752,48 @@ function serveStatic(req, res) {
       'Cache-Control': 'no-store',
     });
     res.end(JSON.stringify({ key: ROOM_KEY }));
+    return;
+  }
+
+  /* ---------- 图片头像 ---------- */
+  //
+  // /avatar/<token>.png
+  //
+  // 头像是真人照片，所以和房间一样要口令才能看。
+  // 但 <img> 标签没法带自定义 header，所以口令走查询参数 ?k=xxx。
+  //
+  // token 本身是 64 位随机（16 个 hex），猜不到；
+  // 口令校验是第二道保险 —— 万一链接被转发，别人的照片不会裸奔。
+  if (pathname.startsWith('/avatar/')) {
+    const m = /^([0-9a-f]{16})\.png$/.exec(pathname.slice('/avatar/'.length));
+    if (!m) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('头像不存在');
+      return;
+    }
+    let given = '';
+    try {
+      given = new URL(req.url, 'http://localhost').searchParams.get('k') || '';
+    } catch { given = ''; }
+    if (!keyMatches(given)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('需要房间口令');
+      return;
+    }
+    const avatarPath = path.join(AVATAR_DIR, `${m[1]}.png`);
+    fs.readFile(avatarPath, (err, data) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('头像不存在');
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'image/png',
+        // 文件名带随机 token，内容变了就是新 URL —— 可以放心长期缓存
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      });
+      res.end(data);
+    });
     return;
   }
 
@@ -724,8 +891,12 @@ wss.on('connection', (ws, req) => {
 
   let user;
   if (known) {
-    // 同一浏览器刷新/重连 → 沿用原来的 id、昵称、颜色
-    user = { id: known.id, name: known.name, color: known.color };
+    // 同一浏览器刷新/重连 → 沿用原来的 id、昵称、颜色、图片头像
+    //
+    // ⚠️ 用户的核心要求：「进去后名字和头像，没要求改动就保持不变」。
+    // 所以这里必须把 avatar 一起带回来 —— 少了它，用户换了图片头像后
+    // 一刷新就退回默认头像了。
+    user = { id: known.id, name: known.name, color: known.color, avatar: known.avatar || '' };
     user.name = uniqueName(user.name, user.id);   // 期间被别人占用过则自动改名
     S.setClient.run(clientId, now, user.id);
     try {
@@ -863,6 +1034,39 @@ wss.on('connection', (ws, req) => {
           user.colorAt = now;
           S.renameUser.run(user.name, user.color, now, user.id);
         }
+        // 选了颜色 = 回到「字母头像」，把之前的图片头像撤掉
+        if (user.avatar) {
+          removeAvatarFile(user.avatar);
+          user.avatar = '';
+          S.setAvatar.run('', now, user.id);
+        }
+        broadcast({ t: 'avatar', user: publicUser(user) });
+        send(ws, { t: 'avatarAck', ok: true, user: publicUser(user) });
+        break;
+      }
+
+      /* ---------- 上传图片头像（从相册选一张） ---------- */
+      case 'avatarImage': {
+        const now = Date.now();
+        // 连点保护：3 秒内不让连续上传（换图比换色重，间隔给足）
+        if (user.avatarAt && now - user.avatarAt < AVATAR_COOLDOWN_MS) {
+          send(ws, { t: 'avatarAck', ok: false, msg: '换得太快啦，等一下再试' });
+          return;
+        }
+
+        const saved = saveAvatarImage(data.data);
+        if (!saved.ok) {
+          send(ws, { t: 'avatarAck', ok: false, msg: saved.msg });
+          return;
+        }
+
+        // 旧的图片头像用完就删 —— 不留孤儿文件在磁盘上
+        const oldAvatar = user.avatar;
+        user.avatar = saved.filename;
+        user.avatarAt = now;
+        S.setAvatar.run(user.avatar, now, user.id);
+        if (oldAvatar && oldAvatar !== saved.filename) removeAvatarFile(oldAvatar);
+
         broadcast({ t: 'avatar', user: publicUser(user) });
         send(ws, { t: 'avatarAck', ok: true, user: publicUser(user) });
         break;

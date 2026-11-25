@@ -21,6 +21,7 @@
     keyLen: $('keyLen'), keyPaste: $('keyPaste'), keyErr: $('keyErr'),
     keyOk: $('keyOk'), keyCancel: $('keyCancel'),
     avatarModal: $('avatarModal'), colorGrid: $('colorGrid'), avatarCancel: $('avatarCancel'),
+    avatarFile: $('avatarFile'), avatarUploadPreview: $('avatarUploadPreview'),
     avatarConfirm: $('avatarConfirm'), avatarPreview: $('avatarPreview'),
     avatarPreviewName: $('avatarPreviewName'), avatarErr: $('avatarErr'),
     avatarConfirmOk: $('avatarConfirmOk'), avatarConfirmCancel: $('avatarConfirmCancel'),
@@ -30,6 +31,7 @@
   const GROUP_WINDOW = 5 * 60 * 1000;     // 连续消息合并的间隔
   const TYPING_TTL = 3200;                // 输入中提示的存活时间
   const BASE_TITLE = '聊天网页';
+  const AVATAR_SIZE = 128;                // 图片头像边长（与服务端一致）
 
   const EMOJIS = [
     '😀','😄','😁','😊','🙂','😉','😍','🥰',
@@ -69,6 +71,8 @@
     takeover: false,   // 被别的连接顶替了，等用户点「重新进入」
     colors: [],        // 可选头像色（服务端下发，客户端只照着渲染）
     pickedColor: '',   // 在调色板里选中、但还没确认的颜色
+    pickedImage: '',       // 选中的图片（dataURL），还没确认
+    pickedImageData: '',   // 选中的图片（dataURL），待上传
   };
 
   /* ---------------- 工具 ---------------- */
@@ -215,13 +219,40 @@
    * @param {HTMLElement} node 头像元素
    * @param {string} color 底色
    * @param {string} [text] 头像文字（传入时同步更新文字与字号标记）
+   * @param {string} [avatar] 图片头像文件名（服务端给的 token.png）
+   *
+   * 有图片头像时用图片铺满圆形，没有才退回「底色 + 昵称首字」。
    */
-  function paintAvatar(node, color, text) {
-    node.style.background = color;
-    node.style.color = avatarTextColor(color);
-    if (text !== undefined) node.textContent = text;
-    // 文字长度写进 data-len，CSS 据此缩小字号，避免两字撑破圆形
-    node.setAttribute('data-len', String((node.textContent || '').length));
+  function paintAvatar(node, color, text, avatar) {
+    const hasImg = !!avatar;
+    node.setAttribute('data-img', hasImg ? '1' : '0');
+    if (hasImg) {
+      node.style.backgroundImage = `url("${avatarUrl(avatar)}")`;
+      node.style.backgroundColor = 'transparent';
+      node.style.backgroundSize = 'cover';
+      node.style.backgroundPosition = 'center';
+      node.textContent = '';
+      node.setAttribute('data-len', '0');
+    } else {
+      // 用 background 简写 —— 会把 background-image 一并清掉，
+      // 从图片头像切回字母头像时不会残留图层。
+      node.style.background = color;
+      node.style.color = avatarTextColor(color);
+      if (text !== undefined) node.textContent = text;
+      // 文字长度写进 data-len，CSS 据此缩小字号，避免两字撑破圆形
+      node.setAttribute('data-len', String((node.textContent || '').length));
+    }
+  }
+
+  /**
+   * 图片头像的完整地址。
+   *
+   * 头像文件受房间口令保护（服务端 /avatar/<token>?k=<口令>），
+   * 所以这里要把当前口令带上 —— <img> 没法带自定义 header，只能走查询参数。
+   */
+  function avatarUrl(filename) {
+    if (!filename) return '';
+    return `/avatar/${encodeURIComponent(filename)}?k=${encodeURIComponent(state.key || '')}`;
   }
 
   function isSelf(msg) {
@@ -434,11 +465,14 @@
       }
 
       case 'avatar': {
-        // 换了头像颜色 —— 成员列表、消息里的头像都要跟着变
+        // 换了头像（颜色或图片）—— 成员列表、消息里的头像都要跟着变
         state.users.set(data.user.id, data.user);
         if (state.self && data.user.id === state.self.id) state.self = data.user;
         for (const m of state.messages) {
-          if (m.from.id === data.user.id) m.from.color = data.user.color;
+          if (m.from.id === data.user.id) {
+            m.from.color = data.user.color;
+            m.from.avatar = data.user.avatar || '';
+          }
         }
         renderMe();
         renderUsers();
@@ -452,6 +486,15 @@
           el.avatarErr.hidden = false;
           el.avatarErr.textContent = data.msg || '没改成，再试一次。';
           if (el.avatarConfirm.hidden) pushSystem(data.msg || '没改成，再试一次。');
+          return;
+        }
+        // 成功：回执里带着最终的 user（含 avatar），先落本地状态
+        // —— 服务端的广播随后也会到，两边一致。
+        if (data.user) {
+          state.self = data.user;
+          state.users.set(data.user.id, data.user);
+          renderMe();
+          renderUsers();
         }
         break;
       }
@@ -488,7 +531,7 @@
   function renderMe() {
     if (!state.self) return;
     el.meName.textContent = state.self.name;
-    paintAvatar(el.meAvatar, state.self.color, avatarText(state.self.name));
+    paintAvatar(el.meAvatar, state.self.color, avatarText(state.self.name), state.self.avatar);
   }
 
   function renderUsers() {
@@ -502,7 +545,7 @@
       const av = document.createElement('div');
       av.className = 'avatar';
       // 侧栏头像只有 22px，放两个字会挤，只用单字（字号由 CSS 统一控制）
-      paintAvatar(av, u.color, (u.name || '?').slice(0, 1));
+      paintAvatar(av, u.color, (u.name || '?').slice(0, 1), u.avatar);
       av.style.width = '22px';
       av.style.height = '22px';
 
@@ -552,7 +595,7 @@
 
     const avatar = document.createElement('div');
     avatar.className = 'avatar';
-    paintAvatar(avatar, m.from.color, avatarText(m.from.name));
+    paintAvatar(avatar, m.from.color, avatarText(m.from.name), m.from.avatar);
 
     const body = document.createElement('div');
     body.className = 'body';
@@ -703,13 +746,20 @@
   function openAvatarPicker() {
     if (!state.self) return;
     state.pickedColor = state.self.color;
+    state.pickedImage = '';          // 还没选图
+    state.pickedImageData = '';      // 选图后的 base64（发给服务端用）
     el.avatarErr.hidden = true;
+    el.avatarUploadPreview.style.backgroundImage = '';
+    el.avatarUploadPreview.textContent = '＋';
     renderColorGrid();
     el.avatarModal.hidden = false;
   }
 
   function closeAvatarPicker() {
     el.avatarModal.hidden = true;
+    // 选过的图不要留在内存里，下次打开是干净的
+    state.pickedImage = '';
+    state.pickedImageData = '';
   }
 
   /** 渲染 24 色调色板 */
@@ -725,11 +775,15 @@
       dot.setAttribute('aria-label', '选择颜色 ' + color);
       // 底色深 → 对勾用黑色，否则白色对勾看不见
       if (avatarTextColor(color) === '#2f3336') dot.classList.add('dark');
-      if (color === state.pickedColor) dot.classList.add('sel');
+      if (color === state.pickedColor && !state.pickedImage) dot.classList.add('sel');
       dot.addEventListener('click', () => {
         state.pickedColor = color;
+        state.pickedImage = '';        // 选了颜色 → 不用图片
+        state.pickedImageData = '';
         for (const n of el.colorGrid.children) n.classList.remove('sel');
         dot.classList.add('sel');
+        el.avatarUploadPreview.style.backgroundImage = '';
+        el.avatarUploadPreview.textContent = '＋';
         // 选了颜色 → 先问一句「是否确定修改」，不直接改
         askAvatarConfirm(color);
       });
@@ -737,10 +791,66 @@
     }
   }
 
-  /** 确认框：是否确定修改 */
+  /**
+   * 读用户选的文件 → 居中裁成正方形 → 缩到 128×128 的 PNG。
+   *
+   * 为什么客户端处理：
+   *   - 手机相册里的照片动辄几 MB，发到服务器再裁太慢太费流量
+   *   - 统一裁成方形，头像才是正圆
+   *   - PNG 保留透明，缩到 128px 后一般只有几 KB
+   */
+  function readImageFile(file) {
+    return new Promise((resolve, reject) => {
+      if (!file) return reject(new Error('没有选文件'));
+      if (!/^image\//.test(file.type)) return reject(new Error('这不是图片文件'));
+
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('读取失败，换一张试试'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('这张图打不开，换一张试试'));
+        img.onload = () => {
+          try {
+            // 居中裁剪：取正方形区域
+            const side = Math.min(img.width, img.height);
+            const sx = (img.width - side) / 2;
+            const sy = (img.height - side) / 2;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = AVATAR_SIZE;
+            canvas.height = AVATAR_SIZE;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, sx, sy, side, side, 0, 0, AVATAR_SIZE, AVATAR_SIZE);
+
+            // toDataURL('image/png') 保留透明
+            resolve(canvas.toDataURL('image/png'));
+          } catch (err) {
+            reject(new Error('处理失败，换一张试试'));
+          }
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /** 确认框：是否确定修改（颜色或图片都行） */
   function askAvatarConfirm(color) {
     if (!state.self) return;
-    paintAvatar(el.avatarPreview, color, avatarText(state.self.name));
+    if (state.pickedImage) {
+      // 图片头像：用 dataURL 直接铺在预览上（还没上传，所以不能走 /avatar/）
+      el.avatarPreview.setAttribute('data-img', '1');
+      el.avatarPreview.style.backgroundImage = `url("${state.pickedImage}")`;
+      el.avatarPreview.style.backgroundColor = 'transparent';
+      el.avatarPreview.style.backgroundSize = 'cover';
+      el.avatarPreview.style.backgroundPosition = 'center';
+      el.avatarPreview.textContent = '';
+      el.avatarPreview.setAttribute('data-len', '0');
+    } else {
+      el.avatarPreview.setAttribute('data-img', '0');
+      paintAvatar(el.avatarPreview, color, avatarText(state.self.name));
+    }
     el.avatarPreviewName.textContent = state.self.name;
     el.avatarErr.hidden = true;
     el.avatarConfirm.hidden = false;
@@ -752,12 +862,22 @@
 
   /** 真的改 */
   function confirmAvatarChange() {
-    const color = state.pickedColor;
-    if (!color) { closeAvatarConfirm(); return; }
-    if (!wsSend({ t: 'avatar', color })) {
-      el.avatarErr.hidden = false;
-      el.avatarErr.textContent = '还没连上服务器，稍后再试。';
-      return;
+    if (state.pickedImage && state.pickedImageData) {
+      // 上传图片：dataURL 是 "data:image/png;base64,XXXX"，只发 base64 部分
+      const b64 = state.pickedImageData.split(',')[1] || '';
+      if (!wsSend({ t: 'avatarImage', data: b64 })) {
+        el.avatarErr.hidden = false;
+        el.avatarErr.textContent = '还没连上服务器，稍后再试。';
+        return;
+      }
+    } else {
+      const color = state.pickedColor;
+      if (!color) { closeAvatarConfirm(); return; }
+      if (!wsSend({ t: 'avatar', color })) {
+        el.avatarErr.hidden = false;
+        el.avatarErr.textContent = '还没连上服务器，稍后再试。';
+        return;
+      }
     }
     closeAvatarConfirm();
     closeAvatarPicker();
@@ -860,6 +980,32 @@
   el.avatarCancel.addEventListener('click', closeAvatarPicker);
   el.avatarConfirmOk.addEventListener('click', confirmAvatarChange);
   el.avatarConfirmCancel.addEventListener('click', closeAvatarConfirm);
+
+  // 从相册选图
+  el.avatarFile.addEventListener('change', async () => {
+    const file = el.avatarFile.files && el.avatarFile.files[0];
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFile(file);
+      state.pickedImage = dataUrl;
+      state.pickedImageData = dataUrl;
+      // 缩略预览
+      el.avatarUploadPreview.style.backgroundImage = `url("${dataUrl}")`;
+      el.avatarUploadPreview.textContent = '';
+      // 选了图 → 颜色就不作数了，取消调色板上的高亮
+      for (const n of el.colorGrid.children) n.classList.remove('sel');
+      // 一样要先问「是否确定修改」
+      askAvatarConfirm(state.pickedColor);
+    } catch (err) {
+      el.avatarErr.hidden = false;
+      el.avatarErr.textContent = err.message || '这张图用不了，换一张试试';
+      el.avatarUploadPreview.style.backgroundImage = '';
+      el.avatarUploadPreview.textContent = '＋';
+    } finally {
+      // 清掉 input 的值 —— 否则连续选同一张图不会触发 change 事件
+      try { el.avatarFile.value = ''; } catch { /* ignore */ }
+    }
+  });
 
   /* ---------------- 口令弹窗 ---------------- */
 

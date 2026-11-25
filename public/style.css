@@ -605,6 +605,86 @@ body {
 
 .modal-avatar { max-width: 340px; }
 
+/* ---------------- 从相册选图 ---------------- */
+
+/* 上传区：点一下就弹系统相册选择器 */
+.avatar-upload {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1.5px dashed #b9c6d4;
+  border-radius: 12px;
+  cursor: pointer;
+  background: #f7fafd;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.avatar-upload:hover {
+  border-color: #4a9eff;
+  background: #f0f6ff;
+}
+
+/* 已选图片时的缩略预览 */
+.avatar-upload-preview {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #8a929c;
+  background: #e8eef5 center / cover no-repeat;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.avatar-upload-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.avatar-upload-text b {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1c1e21;
+}
+
+.avatar-upload-text i {
+  font-size: 12px;
+  font-style: normal;
+  color: #8a929c;
+}
+
+/* 上传区和调色板之间的分隔线 */
+.modal-sep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 10px;
+  font-size: 12px;
+  color: #8a929c;
+}
+
+.modal-sep::before,
+.modal-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e3e8ee;
+}
+
+/* 图片头像：铺满圆形 */
+.avatar[data-img="1"] {
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
 .avatar-xl {
   width: 56px;
   height: 56px;
