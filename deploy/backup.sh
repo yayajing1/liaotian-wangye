@@ -10,11 +10,13 @@
 
 set -euo pipefail
 
+# 先记住用户是否显式指定了 DATA_DIR —— 必须在赋默认值之前判断，
+# 否则默认值会让「显式指定」永远为真，自动识别逻辑形同虚设。
+DATA_DIR_EXPLICIT=0
+[ -n "${DATA_DIR:-}" ] && DATA_DIR_EXPLICIT=1
+
 APP_DIR="${APP_DIR:-/opt/chat-room}"
 DATA_DIR="${DATA_DIR:-$APP_DIR/data}"
-BACKUP_DIR="${1:-$APP_DIR/backups}"
-APP_DIR_EXPLICIT=0
-[ -n "${DATA_DIR:-}" ] && DATA_DIR_EXPLICIT=1
 
 # 自动识别安装目录 —— 跟 deploy.sh / https-setup.sh 保持一致：
 # 脚本所在目录就有 server.js 时就地操作，避免代码和 data/ 错位。
@@ -25,6 +27,9 @@ if [ "$DATA_DIR_EXPLICIT" -eq 0 ] && [ -f "$SCRIPT_DIR/server.js" ]; then
   APP_DIR="$SCRIPT_DIR"
   DATA_DIR="${APP_DIR}/data"
 fi
+
+# BACKUP_DIR 必须在 APP_DIR 确定之后才算，否则会落到旧目录
+BACKUP_DIR="${1:-$APP_DIR/backups}"
 
 if [ ! -d "$DATA_DIR" ]; then
   echo "[ERROR] 数据目录不存在: $DATA_DIR" >&2
