@@ -49,6 +49,7 @@
     retry: 0,
     lastTypingSent: 0,
     key: '',           // 房间口令
+    takeover: false,   // 被别的连接顶替了，等用户点「重新进入」
   };
 
   /* ---------------- 工具 ---------------- */
@@ -235,8 +236,10 @@
       }
       // 被同一浏览器的另一个连接顶替（刷新 / 开了两个标签页）
       // —— 这不是故障，重连只会互相踢，所以不重连。
+      // 但要让用户能主动「接管」：点一下连接状态就换新身份重新进。
       if (evt.code === 4002) {
-        setConn('已在别处打开本房间', false);
+        setConn('已在别处打开本房间 · 点这里重新进入', false);
+        state.takeover = true;
         return;
       }
       const delay = Math.min(1000 * Math.pow(2, state.retry++), 30000);
@@ -657,6 +660,15 @@
   }
 
   /* ---------------- 事件绑定 ---------------- */
+
+  // 被别的连接顶替时，点连接状态可以「换新身份重新进入」
+  el.conn.addEventListener('click', () => {
+    if (!state.takeover) return;
+    state.takeover = false;
+    try { localStorage.removeItem(CID_KEY); } catch { /* ignore */ }
+    setConn('正在重新进入…', false);
+    connect();
+  });
 
   el.sendBtn.addEventListener('click', send);
 
