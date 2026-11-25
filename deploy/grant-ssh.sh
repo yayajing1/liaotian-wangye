@@ -28,14 +28,38 @@ chmod 600 "$HOME/.ssh/authorized_keys"
 
 echo "===== 2/4 adjusting sshd config ====="
 SSHD_CONF=/etc/ssh/sshd_config
+SSHD_BAK=""
+
 if [ -f "$SSHD_CONF" ]; then
+  # SAFETY: back up the config first. If our edit produces an invalid
+  # config we restore it immediately -- otherwise the user could lock
+  # themselves out of their own server.
+  SSHD_BAK="$SSHD_CONF.grantbak"
+  cp "$SSHD_CONF" "$SSHD_BAK"
+
   # sshd uses the FIRST value it obtains for a keyword, so we must
   # replace existing lines (even commented-out ones) instead of appending.
   sed -i 's/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin yes/' "$SSHD_CONF"
   sed -i 's/^[#[:space:]]*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_CONF"
   grep -q '^PermitRootLogin yes' "$SSHD_CONF" || echo 'PermitRootLogin yes' >> "$SSHD_CONF"
   grep -q '^PubkeyAuthentication yes' "$SSHD_CONF" || echo 'PubkeyAuthentication yes' >> "$SSHD_CONF"
-  echo "  sshd_config updated ok"
+
+  # Validate before reloading. If sshd can't parse it, roll back.
+  SSHD_TEST_BIN=""
+  for c in sshd /usr/sbin/sshd; do
+    command -v "$c" >/dev/null 2>&1 && { SSHD_TEST_BIN="$c"; break; }
+  done
+  if [ -n "$SSHD_TEST_BIN" ]; then
+    if "$SSHD_TEST_BIN" -t >/dev/null 2>&1; then
+      echo "  sshd_config updated & validated ok"
+    else
+      cp "$SSHD_BAK" "$SSHD_CONF"
+      echo "  WARNING: modified config was invalid -> restored original"
+      echo "  (pubkey login may not work; other methods still possible)"
+    fi
+  else
+    echo "  sshd_config updated (could not validate: sshd binary not found)"
+  fi
 fi
 
 echo "===== 3/4 reloading sshd ====="
