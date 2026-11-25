@@ -22,6 +22,8 @@ PORT="8000"
 DATA_DIR="/opt/chat-room/data"
 PKG_URL=""
 SELF_URL=""
+GIT_REPO=""
+WITH_HTTPS=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,12 +31,17 @@ while [ $# -gt 0 ]; do
     --dir)  APP_DIR="$2"; shift 2 ;;
     --url)  PKG_URL="$2"; shift 2 ;;
     --self) SELF_URL="$2"; shift 2 ;;
+    --git)  GIT_REPO="$2"; shift 2 ;;
+    --https) WITH_HTTPS=1; shift ;;
     -h|--help)
-      echo "用法: bash deploy.sh [--port 端口] [--dir 安装目录] [--url 代码包下载地址] [--self 本脚本下载地址]"
+      echo "用法: bash deploy.sh [--port 端口] [--dir 安装目录] [--url 代码包下载地址] [--self 本脚本下载地址] [--git GitHub仓库地址] [--https 顺便配HTTPS]"
       exit 0 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
+
+# --dir 改了安装目录，数据目录跟着走
+DATA_DIR="${APP_DIR}/data"
 
 C_G="\033[32m"; C_Y="\033[33m"; C_R="\033[31m"; C_C="\033[36m"; C_0="\033[0m"
 say() { printf "%b\n" "$1"; }
@@ -179,6 +186,14 @@ say "[2/5] 安装依赖 ..."
 #
 # --self 自举：如果知道本脚本是从哪个 URL 下载的，
 # 就自动推断出同目录下同名的代码包（deploy.sh ↔ chat-room.tar.gz）。
+# 代码获取策略：
+#   a) 显式给了 --git → 一定从 GitHub 拉（哪怕目录里已经有旧代码，也要更新）
+#   b) APP_DIR 里已经有 server.js → 直接用
+#   c) 只上传了 chat-room.tar.gz → 自动解开
+#   d) 服务器上一条命令从网上拉 —— 用 --url 或 --self 指定来源
+#
+# --self 自举：如果知道本脚本是从哪个 URL 下载的，
+# 就自动推断出同目录下同名的代码包（deploy.sh ↔ chat-room.tar.gz）。
 if [ -z "$PKG_URL" ] && [ -n "$SELF_URL" ]; then
   case "$SELF_URL" in
     */deploy.sh)
@@ -188,13 +203,72 @@ if [ -z "$PKG_URL" ] && [ -n "$SELF_URL" ]; then
   esac
 fi
 
-if [ ! -f "$APP_DIR/server.js" ]; then
+if [ -n "$GIT_REPO" ] || [ ! -f "$APP_DIR/server.js" ]; then
   TARBALL=""
   for cand in /root/chat-room.tar.gz /root/chat-room.tar.gz "$HOME/chat-room.tar.gz"; do
     [ -f "$cand" ] && TARBALL="$cand" && break
   done
 
-  if [ -n "$TARBALL" ]; then
+  if [ -n "$GIT_REPO" ]; then
+    # 从 GitHub 直接 clone —— 免去传文件，服务器一条命令搞定
+    say "      从 GitHub 拉取代码 ..."
+    say "      $GIT_REPO"
+
+    CLONE_TMP=$(mktemp -d)
+    CLONE_OK=0
+
+    # 优先 git clone。精简镜像常常没装 git，没装就装。
+    if command -v git >/dev/null 2>&1; then
+      if git clone --depth 1 "$GIT_REPO" "$CLONE_TMP/app" >/dev/null 2>&1; then
+        CLONE_OK=1
+      fi
+    else
+      say "      未检测到 git，尝试安装 ..."
+      (apt-get update -qq && apt-get install -y -qq git) >/dev/null 2>&1 \
+        || (yum install -y -q git) >/dev/null 2>&1 \
+        || true
+      if command -v git >/dev/null 2>&1; then
+        git clone --depth 1 "$GIT_REPO" "$CLONE_TMP/app" >/dev/null 2>&1 && CLONE_OK=1
+      fi
+    fi
+
+    # 兜底：git 装不上 / 克隆失败 → 直接下载 codeload 的 tarball
+    if [ "$CLONE_OK" -eq 0 ]; then
+      say "      git 方式不可用，改用压缩包下载 ..."
+      # https://github.com/<user>/<repo>.git → https://codeload.github.com/<user>/<repo>/tar.gz/<branch>
+      REPO_PATH="${GIT_REPO%.git}"
+      REPO_PATH="${REPO_PATH#https://github.com/}"
+      REPO_PATH="${REPO_PATH#http://github.com/}"
+      REPO_PATH="${REPO_PATH#git@github.com:}"
+      OWNER="${REPO_PATH%%/*}"
+      REPO_NAME="${REPO_PATH##*/}"
+      TARBALL_URL="https://codeload.github.com/${OWNER}/${REPO_NAME}/tar.gz/refs/heads/main"
+
+      if fetch_ok "$TARBALL_URL" "$CLONE_TMP/app.tar.gz" 120 2; then
+        if tar -tzf "$CLONE_TMP/app.tar.gz" >/dev/null 2>&1; then
+          mkdir -p "$CLONE_TMP/app"
+          tar -xzf "$CLONE_TMP/app.tar.gz" -C "$CLONE_TMP/app" --strip-components=1
+          CLONE_OK=1
+        fi
+      fi
+    fi
+
+    if [ "$CLONE_OK" -eq 1 ]; then
+      mkdir -p "$APP_DIR"
+      # 只拷代码，不碰已有 data/
+      cp -a "$CLONE_TMP/app/." "$APP_DIR/"
+      rm -rf "$CLONE_TMP"
+      say "      拉取完成 ✓"
+    else
+      rm -rf "$CLONE_TMP"
+      say "${C_R}[ERROR] 从 GitHub 拉取失败${C_0}"
+      say "      请检查："
+      say "        1. 仓库地址是否正确（现在是 $GIT_REPO）"
+      say "        2. 仓库是否为 Public（私有仓库需要配 SSH key 或 token）"
+      say "        3. 服务器能否访问 github.com：curl -I https://github.com"
+      exit 1
+    fi
+  elif [ -n "$TARBALL" ]; then
     say "      发现 $TARBALL，正在解开到 $APP_DIR ..."
     mkdir -p "$APP_DIR"
     tar -xzf "$TARBALL" -C "$APP_DIR"
@@ -225,15 +299,18 @@ if [ ! -f "$APP_DIR/server.js" ]; then
     fi
   else
     say "${C_R}[ERROR] $APP_DIR 下没有 server.js${C_0}"
-    say "      请先把代码放过去，三选一："
+    say "      请先把代码放过去，四选一："
     say ""
-    say "        ${C_C}方式1${C_0}（有电脑，推荐）："
+    say "        ${C_C}方式1${C_0}（从 GitHub 拉，最省事，推荐）："
+    say "          bash deploy/deploy.sh --git https://github.com/<用户名>/<仓库名>.git"
+    say ""
+    say "        ${C_C}方式2${C_0}（有电脑）："
     say "          scp -P 22 deploy/chat-room.tar.gz root@你的IP:/root/   # 然后重跑本脚本"
     say ""
-    say "        ${C_C}方式2${C_0}（只有手机，一条命令）："
+    say "        ${C_C}方式3${C_0}（只有手机，一条命令）："
     say "          bash deploy/deploy.sh --url <代码包的下载链接>"
     say ""
-    say "        ${C_C}方式3${C_0}（手动上传解包）："
+    say "        ${C_C}方式4${C_0}（手动上传解包）："
     say "          tar -xzf chat-room.tar.gz -C $APP_DIR"
     exit 1
   fi
@@ -497,3 +574,24 @@ say "  systemctl status chat-room    查看状态"
 say "  systemctl restart chat-room   重启"
 say "  journalctl -u chat-room -f    看实时日志"
 say ""
+
+# ---------- 6. 可选：装 HTTPS ----------
+# 为什么单独一步：HTTPS 需要 80/443 端口放行，
+# 而放行是在云控制台做的（服务器自己改不了），
+# 所以这里把该做的都做了，最后告诉你控制台要放行什么。
+if [ "$WITH_HTTPS" -eq 1 ]; then
+  say ""
+  say "${C_C}============================================${C_0}"
+  say "${C_C}  第 6 步：配置 HTTPS（地址栏小锁 + wss）${C_0}"
+  say "${C_C}============================================${C_0}"
+
+  HTTPS_SH="$APP_DIR/deploy/https-setup.sh"
+  if [ -f "$HTTPS_SH" ]; then
+    # 装依赖那步可能因为 --omit=dev 跳过了 devDeps，但这个脚本是纯 bash，无依赖
+    bash "$HTTPS_SH" --ip "$PUB_IP" --port "$PORT" --dir "$APP_DIR" || \
+      say "${C_Y}[提示] HTTPS 环节未完全成功，可稍后单独跑：bash deploy/https-setup.sh${C_0}"
+  else
+    say "${C_Y}[提示] 没找到 $HTTPS_SH${C_0}"
+  fi
+fi
+

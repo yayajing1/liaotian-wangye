@@ -23,6 +23,7 @@ echo "打包中..."
 #   package.json        依赖清单
 #   package-lock.json   锁定版本
 #   deploy/deploy.sh    部署脚本
+#   deploy/https-setup.sh  HTTPS 装配脚本（IP 证书 + Nginx）
 #   deploy/backup.sh    数据备份/迁移脚本（1 个月到期迁移时用）
 # 不带 node_modules（服务器上装）、不带 data/（服务器上建）
 #
@@ -38,6 +39,7 @@ tar -czf "$OUT" \
   package.json \
   package-lock.json \
   deploy/deploy.sh \
+  deploy/https-setup.sh \
   deploy/backup.sh \
   2>/dev/null
 
