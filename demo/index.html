@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>聊天网页</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #d7eaf8;
+      font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+      cursor: pointer;
+      overflow: hidden;
+    }
+    .stage { text-align: center; }
+    h1 {
+      font-family: "STXingkai", "华文行楷", "STKaiti", "KaiTi", cursive;
+      font-size: clamp(46px, 9vw, 88px);
+      font-weight: 400;
+      letter-spacing: 0.12em;
+      text-indent: 0.12em;
+      color: #7ec8e3;
+      text-shadow: 0 2px 10px rgba(255, 255, 255, .6);
+    }
+    .sub { margin-top: 10px; font-size: 13px; color: #6f8394; letter-spacing: 2px; }
+    .tip {
+      margin-top: 26px; display: inline-block;
+      padding: 9px 30px; border-radius: 22px;
+      background: #fff; border: 1px solid #b9d7ec; color: #3d7ea6;
+      font-size: 13.5px; letter-spacing: 1px;
+      box-shadow: 0 3px 12px rgba(60, 120, 160, .12);
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <h1>聊天网页</h1>
+    <div class="sub">多人聊天室</div>
+    <div class="tip">点击进入聊天室</div>
+  </div>
+  <script>
+    (function () {
+      var TARGET = 'http://localhost:8000/chat';
+      var gone = false;
+      function go() {
+        if (gone) return;
+        gone = true;
+        window.location.href = TARGET;
+      }
+      document.addEventListener('click', go);
+      setTimeout(go, 1800);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "chat-room",
+  "version": "1.0.0",
+  "private": true,
+  "description": "极简网页聊天室 —— 自己的消息在右边，别人的在左边",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "launch": "node launch.js",
+    "test": "node test/multi-client-test.js",
+    "test:public": "node test/public-e2e-test.js"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@camera.ui/cloudflared": "^2026.11.2"
+  }
+}

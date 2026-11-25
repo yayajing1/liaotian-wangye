@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>聊天网页</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="side-top">
+        <h1 class="room-title">聊天网页</h1>
+        <div class="conn" id="conn"><i class="dot"></i><span id="connText">连接中…</span></div>
+      </div>
+
+      <div class="me">
+        <div class="avatar avatar-lg" id="meAvatar">·</div>
+        <div class="me-info">
+          <div class="me-name" id="meName">…</div>
+          <button class="link-btn" id="nickBtn" type="button">点击改名</button>
+        </div>
+      </div>
+
+      <div class="side-label">在线成员 <span id="userCount">0</span></div>
+      <ul class="users" id="userList"></ul>
+    </aside>
+
+    <main class="chat">
+      <div class="messages" id="messages"></div>
+
+      <div class="more-wrap" id="moreWrap" hidden>
+        <button type="button" class="more-btn" id="moreBtn">加载更早的消息</button>
+      </div>
+
+      <div class="typing" id="typing"></div>
+
+      <div class="composer">
+        <div class="quote-bar" id="quoteBar" hidden>
+          <div class="quote-info">
+            <div class="quote-label" id="quoteLabel">引用</div>
+            <div class="quote-text" id="quoteText"></div>
+          </div>
+          <button type="button" class="quote-close" id="quoteClose" aria-label="取消引用">×</button>
+        </div>
+
+        <div class="input-row">
+          <button type="button" class="icon-btn" id="emojiBtn" title="表情">☺</button>
+          <textarea id="input" rows="1" maxlength="1000"
+            placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+          <button type="button" class="send-btn" id="sendBtn">发送</button>
+        </div>
+
+        <div class="emoji-panel" id="emojiPanel" hidden></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

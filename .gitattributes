@@ -1,0 +1,25 @@
+# ============================================================
+#  换行符规则
+# ============================================================
+# 关键：部署脚本必须在 Linux 上保持 LF 换行。
+# 如果提交成 CRLF，Linux 执行时会报
+#   /bin/bash^M: bad interpreter: No such file or directory
+# 或 chmod +x 后仍提示 permission denied。
+
+# shell 脚本 —— 强制 LF
+*.sh        text eol=lf
+deploy.sh   text eol=lf
+deploy/*.sh text eol=lf
+
+# 源码和文本 —— 仓库内统一 LF，避免跨平台 diff 噪音
+*.js        text eol=lf
+*.json      text eol=lf
+*.md        text eol=lf
+*.html      text eol=lf
+*.css       text eol=lf
+.env.example text eol=lf
+
+# 二进制 —— 不做换行转换
+*.png       binary
+*.db        binary
+*.tar.gz    binary
