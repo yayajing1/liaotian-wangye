@@ -204,7 +204,7 @@ if command -v curl >/dev/null 2>&1; then
   # curl 拿到的是二进制帧，grep 不到 "bad_key" 字符串，会误报「握手没响应」。
   # 服务器上有 Node（项目依赖里有 ws），直接用 node 测最准。
   WS_CHECK_SCRIPT='
-const url = process.argv[1];
+const url = process.argv[2];
 const WebSocket = require("ws");
 const w = new WebSocket(url, { rejectUnauthorized: false });
 let done = false;
