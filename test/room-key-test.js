@@ -26,6 +26,7 @@ const TEST_PORT = 8806;
 const DATA_DIR = path.join(ROOT, 'data', 'test-room-key');
 const DB_FILE = path.join(DATA_DIR, 'chat.db');
 const ROOM_KEY = 'test-key-123456';
+const ROOM_KEY_SPARE = 'spare-key-654321';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -108,6 +109,7 @@ function fetchRoomKey(hostHeader) {
       ALT_PORT: '0',
       DATA_DIR,
       ROOM_KEY,
+      ROOM_KEY_SPARE,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -202,6 +204,12 @@ function fetchRoomKey(hostHeader) {
 
     const stillBad = await tryConnect(ROOM_KEY.slice(0, -1) + 'x', 'rk-norm-bad');
     check('真的写错了仍然被拒', !stillBad.ok, `code=${stillBad.code}`);
+
+    console.log('\n[8] 备用口令：主口令那版失效时的备选');
+    const spare = await tryConnect(ROOM_KEY_SPARE, 'rk-spare');
+    check('用备用口令也能进', spare.ok, spare.ok ? `昵称=${spare.self.name}` : `code=${spare.code}`);
+    const spareWrong = await tryConnect(ROOM_KEY_SPARE.slice(0, -1) + 'x', 'rk-spare-bad');
+    check('备用口令写错了仍然被拒', !spareWrong.ok, `code=${spareWrong.code}`);
   } finally {
     openSockets.forEach((ws) => { try { ws.close(); } catch { /* ignore */ } });
     try { server.kill(); } catch { /* ignore */ }

@@ -65,6 +65,17 @@ const db = new DatabaseSync(path.join(DATA_DIR, 'chat.db'));
 const ROOM_KEY = loadRoomKey();
 
 /**
+ * 备用口令（可选，来自环境变量 ROOM_KEY_SPARE）。
+ *
+ * 主口令靠链接传递，链接触手过程中字符容易被被动过：
+ * 聊天软件转码、手抄时把 1 看成 l / 0 看成 o。
+ * 多认一把备用口令，主口令那一版失效了链接照样能进。
+ * 空串 = 没有备用口令。
+ */
+const ROOM_KEY_SPARE = (process.env.ROOM_KEY_SPARE === undefined)
+  ? '' : normalizeKey(process.env.ROOM_KEY_SPARE);
+
+/**
  * 口令字符集：故意去掉 0/O、1/l/I 这些"长得太像"的字符。
  *
  * 踩过的坑：原来的口令是十六进制，人工从聊天记录往手机里誊的时候，
@@ -126,8 +137,14 @@ function keyMatches(given) {
   if (!ROOM_KEY) return true;                       // 公开房间，不校验
   const a = Buffer.from(normalizeKey(given), 'utf8');
   const b = Buffer.from(normalizeKey(ROOM_KEY), 'utf8');
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  if (a.length === b.length && crypto.timingSafeEqual(a, b)) return true;
+
+  // 备用口令：长度必须一样才比，否则 timingSafeEqual 会抛异常
+  if (ROOM_KEY_SPARE) {
+    const c = Buffer.from(ROOM_KEY_SPARE, 'utf8');
+    if (a.length === c.length && crypto.timingSafeEqual(a, c)) return true;
+  }
+  return false;
 }
 
 // WAL 模式需要额外的 -wal/-shm 文件，在某些容器/网络文件系统上会失败。
@@ -881,6 +898,7 @@ server.listen(PORT, HOST, () => {
   console.log(`消息保留 ${RETENTION_MS / 86400000} 天,撤回时限 ${RECALL_WINDOW_MS / 60000} 分钟`);
   if (ROOM_KEY) {
     console.log(`房间口令: ${ROOM_KEY}   （加到链接后面就能进来：…/chat#key=${ROOM_KEY}）`);
+    if (ROOM_KEY_SPARE) console.log(`备用口令: ${ROOM_KEY_SPARE}   （主口令那一版失效时的备选）`);
   } else {
     console.log('房间口令: 未设置（公开房间，谁都能进）');
   }
