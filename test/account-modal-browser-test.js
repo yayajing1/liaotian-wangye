@@ -3,17 +3,20 @@
 /**
  * 账号白框弹窗 —— 浏览器真实测试
  *
- * 验证：
- *   1. 侧栏有「注册账号」入口
- *   2. 弹出来是**白框**（白色背景 + 细边框）
- *   3. 上面是「登入」框、下面是「注册」框，两个都在屏幕上
- *   4. 两个按钮都在（登入 + 注册）
- *   5. 登入框在注册框**上面**（垂直位置）
- *   6. 注册 → 身份不变、昵称不变、token 存下来了
- *   7. 登入 → 换设备后能把身份认回来
+ * 验证新流程（先选择、后填表）：
+ *   1. 侧栏有账号入口
+ *   2. **打开页面自动弹出**白框
+ *   3. 第 1 步只有两个选择：「登入」「注册」，两个都在屏幕上
+ *   4. 表单此时**不出现**（不会同时摆两个密码框）
+ *   5. 点「登入」→ 才展开登入表单；注册表单不出现
+ *   6. 点「注册」→ 才展开注册表单；登入表单不出现
+ *   7. ���个「返回选择」都能退回第 1 步
  *   8. 弱密码在前端就被拦下（不发请求）
- *   9. 登录后侧栏按钮显示账号名
- *  10. 手机尺寸下弹窗不溢出屏幕、能滚动
+ *   9. 两次密码不一致被拦下
+ *  10. 注册 → 身份不变、昵称不变、token 存下来了、弹窗关掉
+ *  11. 登入 → 换设备后能把身份认回来
+ *  12. 登录后侧栏按钮显示账号名
+ *  13. 手机尺寸下弹窗不溢出屏幕、能滚动、输入框字号 ≥16px
  *
  * 用法：node test/account-modal-browser-test.js
  */
@@ -84,21 +87,26 @@ class CDP {
   close() { try { this.ws.close(); } catch { /* ignore */ } }
 }
 
-/** 量白框弹窗的布局 */
+/** 量白框弹窗的布局（新的三步结构） */
 const MEASURE_MODAL = `(function(){
   var modal = document.querySelector('.modal-account');
   var mask = document.getElementById('accountModal');
   if (!modal || mask.hidden) return { hidden: true };
   var mr = modal.getBoundingClientRect();
   var cs = getComputedStyle(modal);
-  var boxes = document.querySelectorAll('#accountModal .acc-box');
-  var loginBox = boxes[0], regBox = boxes[1];
-  var lr = loginBox.getBoundingClientRect();
-  var rr = regBox.getBoundingClientRect();
-  var loginBtn = document.getElementById('accLoginBtn');
-  var regBtn = document.getElementById('accRegBtn');
-  var br1 = loginBtn.getBoundingClientRect();
-  var br2 = regBtn.getBoundingClientRect();
+  function box(id){
+    var e = document.getElementById(id);
+    if (!e) return null;
+    var r = e.getBoundingClientRect();
+    return { w: r.width, h: r.height, top: r.top, bottom: r.bottom, visible: r.width > 0 && r.height > 0 };
+  }
+  var pick = box('accStepPick');
+  var lstep = box('accStepLogin');
+  var rstep = box('accStepReg');
+  var pickLogin = document.getElementById('accPickLogin');
+  var pickReg = document.getElementById('accPickReg');
+  var plr = pickLogin.getBoundingClientRect();
+  var prr = pickReg.getBoundingClientRect();
   return {
     hidden: false,
     bg: cs.backgroundColor,
@@ -106,15 +114,16 @@ const MEASURE_MODAL = `(function(){
     borderStyle: cs.borderTopStyle,
     top: mr.top, bottom: mr.bottom, h: mr.height, w: mr.width,
     vh: window.innerHeight, vw: window.innerWidth,
-    loginTitle: (loginBox.querySelector('.acc-box-title') || {}).textContent,
-    regTitle: (regBox.querySelector('.acc-box-title') || {}).textContent,
-    loginBoxTop: lr.top, regBoxTop: rr.top,
-    loginBoxVisible: lr.height > 0 && lr.width > 0,
-    regBoxVisible: rr.height > 0 && rr.width > 0,
-    loginBtnText: loginBtn.textContent.trim(),
-    regBtnText: regBtn.textContent.trim(),
-    loginBtnVisible: br1.width > 0 && br1.height > 0 && br1.bottom <= window.innerHeight + 1,
-    regBtnVisible: br2.width > 0 && br2.height > 0 && br2.bottom <= window.innerHeight + 1,
+    step: window.ChatApp.state.accStep,
+    pickVisible: pick ? pick.visible : false,
+    loginVisible: lstep ? lstep.visible : false,
+    regVisible: rstep ? rstep.visible : false,
+    pickLoginText: pickLogin.querySelector('.acc-pick-title').textContent.trim(),
+    pickRegText: pickReg.querySelector('.acc-pick-title').textContent.trim(),
+    pickLoginVisible: plr.width > 0 && plr.height > 0,
+    pickRegVisible: prr.width > 0 && prr.height > 0,
+    picksSideBySide: Math.abs(plr.top - prr.top) < 40,
+    picksInScreen: plr.bottom <= window.innerHeight + 1 && prr.bottom <= window.innerHeight + 1,
     scrollable: modal.scrollHeight > modal.clientHeight,
     modalScrollH: modal.scrollHeight,
     modalClientH: modal.clientHeight,
@@ -123,7 +132,7 @@ const MEASURE_MODAL = `(function(){
 })()`;
 
 (async () => {
-  console.log('\n=== 账号白框弹窗（浏览器）测试 ===\n');
+  console.log('\n=== 账号白框弹窗（先选择、后填表）测试 ===\n');
 
   try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -192,39 +201,62 @@ const MEASURE_MODAL = `(function(){
       var t = document.getElementById('accountBtnTxt');
       return { ok: true, text: t ? t.textContent : '', visible: b.getBoundingClientRect().width > 0 };
     })()`);
-    check('侧栏有账号入口', btn.ok === true, btn.why || '');
+    check('侧栏有账号入口', btn.ok === true);
     check('入口按钮可见', btn.visible === true);
     check('未登录时显示「注册账号」', /注册/.test(btn.text || ''), btn.text);
 
-    /* ================= [2] 打开白框 ================= */
-    console.log('\n[2] 白框弹窗');
-    await cdp.evaluate("document.getElementById('accountBtn').click()");
-    await sleep(400);
-
-    const m = await cdp.evaluate(MEASURE_MODAL);
-    check('弹窗打开了', m.hidden === false);
+    /* ================= [2] 打开页面自动弹出 ================= */
+    console.log('\n[2] 打开页面自动弹出账号选择');
+    // init 之后延迟 400ms 才自动弹，这里多等一会儿
+    await sleep(900);
+    let m = await cdp.evaluate(MEASURE_MODAL);
+    check('白框自动弹出来了', m.hidden === false);
+    check('停在第 1 步（选登入/注册）', m.step === 'pick', m.step);
     check('是白框（白色背景）', /255,\s*255,\s*255/.test(m.bg || ''), m.bg);
     check('白框有细边框', parseFloat(m.border) >= 1 && m.borderStyle === 'solid',
       `${m.border} ${m.borderStyle}`);
-    check('上面是「登入」框', (m.loginTitle || '').indexOf('登入') >= 0, m.loginTitle);
-    check('下面是「注册」框', (m.regTitle || '').indexOf('注册') >= 0, m.regTitle);
-    check('登入框可见', m.loginBoxVisible === true);
-    check('注册框可见', m.regBoxVisible === true);
-    check('登入框在注册框上面', m.loginBoxTop < m.regBoxTop,
-      `登入 top=${m.loginBoxTop.toFixed(0)} 注册 top=${m.regBoxTop.toFixed(0)}`);
-    check('有两个按钮：登入 + 注册',
-      m.loginBtnText === '登入' && m.regBtnText === '注册',
-      `${m.loginBtnText} / ${m.regBtnText}`);
-    check('两个按钮都在屏幕内', m.loginBtnVisible && m.regBtnVisible);
-    check('弹窗没有超出屏幕', m.top >= -1 && m.bottom <= m.vh + 1,
+    check('有「登入」选择', (m.pickLoginText || '').indexOf('登入') >= 0, m.pickLoginText);
+    check('有「注册」选择', (m.pickRegText || '').indexOf('注册') >= 0, m.pickRegText);
+    check('两个选择都在屏幕上', m.pickLoginVisible && m.pickRegVisible);
+    check('两个选择并排', m.picksSideBySide === true);
+    check('两个选择没超出屏幕', m.picksInScreen === true);
+    check('此时没有登入表单', m.loginVisible === false);
+    check('此时没有注册表单', m.regVisible === false);
+    check('弹窗没超出屏幕', m.top >= -1 && m.bottom <= m.vh + 1,
       `top=${m.top.toFixed(0)} bottom=${m.bottom.toFixed(0)} vh=${m.vh}`);
 
-    // 截图
-    const shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
+    let shot = await cdp.send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(OUT, Buffer.from(shot.data, 'base64'));
 
-    /* ================= [3] 弱密码前端拦截 ================= */
-    console.log('\n[3] 弱密码前端拦截');
+    /* ================= [3] 选「登入」才展开表单 ================= */
+    console.log('\n[3] 点「登入」→ 展开登入表单');
+    await cdp.evaluate("document.getElementById('accPickLogin').click()");
+    await sleep(300);
+    m = await cdp.evaluate(MEASURE_MODAL);
+    check('切到登入这一步', m.step === 'login', m.step);
+    check('登入表单出现了', m.loginVisible === true);
+    check('注册表单还是没出现', m.regVisible === false);
+    check('选择页收起来了', m.pickVisible === false);
+
+    console.log('\n[4] 「返回选择」能退回第 1 步');
+    await cdp.evaluate("document.getElementById('accBackLogin').click()");
+    await sleep(300);
+    m = await cdp.evaluate(MEASURE_MODAL);
+    check('退回第 1 步', m.step === 'pick', m.step);
+    check('登入表单收起来了', m.loginVisible === false);
+    check('两个选择又回来了', m.pickLoginVisible && m.pickRegVisible);
+
+    /* ================= [5] 选「注册」才展开表单 ================= */
+    console.log('\n[5] 点「注册」→ 展开注册表单');
+    await cdp.evaluate("document.getElementById('accPickReg').click()");
+    await sleep(300);
+    m = await cdp.evaluate(MEASURE_MODAL);
+    check('切到注册这一步', m.step === 'reg', m.step);
+    check('注册表单出现了', m.regVisible === true);
+    check('登入表单还是没出现', m.loginVisible === false);
+
+    /* ================= [6] 弱密码前端拦截 ================= */
+    console.log('\n[6] 弱密码前端拦截');
     const weakRes = await cdp.evaluate(`(function(){
       document.getElementById('accRegName').value = 'testuser';
       document.getElementById('accRegPw').value = 'abc';
@@ -245,8 +277,8 @@ const MEASURE_MODAL = `(function(){
     })()`);
     check('两次密码不一致被前端拦下', mismatch.hidden === false, mismatch.msg);
 
-    /* ================= [4] 注册 ================= */
-    console.log('\n[4] 注册');
+    /* ================= [7] 注册 ================= */
+    console.log('\n[7] 注册');
     const before = await cdp.evaluate('JSON.stringify({id: window.ChatApp.state.self.id, name: window.ChatApp.state.self.name})');
     const beforeObj = JSON.parse(before);
 
@@ -279,8 +311,8 @@ const MEASURE_MODAL = `(function(){
     check('注册后身份没变', reg.selfId === beforeObj.id, reg.selfId);
     check('注册后昵称没变', reg.selfName === beforeObj.name, reg.selfName);
 
-    /* ================= [5] 换设备登入 ================= */
-    console.log('\n[5] 换设备登入');
+    /* ================= [8] 换设备登入 ================= */
+    console.log('\n[8] 换设备登入');
     // 清掉本机身份，模拟「换了台设备」
     await cdp.evaluate("try{localStorage.removeItem('chat_client_id');}catch(e){}");
     await cdp.send('Page.navigate', { url: `http://localhost:${PORT}/chat#key=${KEY}` });
@@ -297,7 +329,6 @@ const MEASURE_MODAL = `(function(){
       selfId: window.ChatApp.state.self.id,
       selfName: window.ChatApp.state.self.name,
       registered: window.ChatApp.state.registered,
-      sessionOk: window.ChatApp.state.self ? true : false,
     })`);
     const autoObj = JSON.parse(auto);
     check('带 token 自动认回身份（不用再输密码）', autoObj.selfId === beforeObj.id,
@@ -305,8 +336,13 @@ const MEASURE_MODAL = `(function(){
     check('昵称也是原来的', autoObj.selfName === beforeObj.name, autoObj.selfName);
     check('状态显示已注册', autoObj.registered === true);
 
-    /* ================= [6] 手机尺寸 ================= */
-    console.log('\n[6] 手机尺寸（iPhone 12：390×844）');
+    // 回访用户（已登录）不该再被自动打断
+    await sleep(900);
+    const revisit = await cdp.evaluate('document.getElementById("accountModal").hidden');
+    check('已登录的回访用户不会被自动弹窗打断', revisit === true);
+
+    /* ================= [9] 手机尺寸 ================= */
+    console.log('\n[9] 手机尺寸（iPhone 12：390×844）');
     await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: 390, height: 844, deviceScaleFactor: 3, mobile: true,
     });
@@ -325,10 +361,20 @@ const MEASURE_MODAL = `(function(){
     const mm = await cdp.evaluate(MEASURE_MODAL);
     check('手机上弹窗打开了', mm.hidden === false);
     check('手机上宽度没超出屏幕', mm.w <= mm.vw + 1, `${mm.w.toFixed(0)} / ${mm.vw}`);
-    check('手机上能滚动（内容高就滚）', mm.scrollable === true,
-      `scrollH=${mm.modalScrollH} clientH=${mm.modalClientH}`);
+    check('手机上停在第 1 步', mm.step === 'pick', mm.step);
+    check('手机上两个选择都在', mm.pickLoginVisible && mm.pickRegVisible);
+    check('手机上两个选择竖排', mm.picksSideBySide === false);
     check('手机上输入框字号 ≥16px', mm.inputFont >= 16, `${mm.inputFont}px`);
-    check('手机上两个框都还在', mm.loginBoxVisible && mm.regBoxVisible);
+
+    // 点「注册」→ 手机上表单不溢出
+    await cdp.evaluate("document.getElementById('accPickReg').click()");
+    await sleep(300);
+    const mm2 = await cdp.evaluate(MEASURE_MODAL);
+    check('手机上注册表单能展开', mm2.regVisible === true);
+    check('手机上注册表单没超宽', mm2.w <= mm2.vw + 1, `${mm2.w.toFixed(0)} / ${mm2.vw}`);
+    // 新流程的弹窗比原来矮 —— 内容应该刚好放得下，不用滚
+    check('手机上内容没被截断（放得下就不用滚）', mm2.modalScrollH <= mm2.modalClientH + 1,
+      `scrollH=${mm2.modalScrollH} clientH=${mm2.modalClientH}`);
 
     const shotM = await cdp.send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(OUT_MOBILE, Buffer.from(shotM.data, 'base64'));

@@ -44,12 +44,20 @@
     // 账号（注册 / 登入）
     accountBtn: $('accountBtn'), accountBtnTxt: $('accountBtnTxt'),
     accountModal: $('accountModal'), accountDesc: $('accountDesc'),
+    // 第 1 步：选「登入 / 注册」
+    accStepPick: $('accStepPick'), accStepLogin: $('accStepLogin'), accStepReg: $('accStepReg'),
+    accPickLogin: $('accPickLogin'), accPickReg: $('accPickReg'),
+    accBackLogin: $('accBackLogin'), accBackReg: $('accBackReg'),
     accLoginName: $('accLoginName'), accLoginPw: $('accLoginPw'), accLoginErr: $('accLoginErr'),
     accLoginBtn: $('accLoginBtn'),
     accRegName: $('accRegName'), accRegPw: $('accRegPw'), accRegPw2: $('accRegPw2'),
     accRegErr: $('accRegErr'), accRegBtn: $('accRegBtn'),
     accState: $('accState'), accStateName: $('accStateName'), accLogoutBtn: $('accLogoutBtn'),
     accCloseBtn: $('accCloseBtn'),
+    // 清除本机聊天记录
+    clearHistBtn: $('clearHistBtn'), clearModal: $('clearModal'),
+    clearModalDesc: $('clearModalDesc'), clearErr: $('clearErr'),
+    clearOk: $('clearOk'), clearCancel: $('clearCancel'),
   };
 
   const RECALL_WINDOW = 2 * 60 * 1000;    // 撤回时限
@@ -92,6 +100,7 @@
     lastTypingSent: 0,
     key: '',           // 房间口令（当前正在用的）
     savedKey: '',      // 本机上次验证通过、记住的口令
+    keyResolved: false, // 是否已经确定「这个房间要不要口令」（公开房间也算确定）
     triedFallback: false, // 链接口令失败后是否已试过回退
     takeover: false,   // 被别的连接顶替了，等用户点「重新进入」
     colors: [],        // 可选头像色（服务端下发，客户端只照着渲染）
@@ -103,6 +112,9 @@
     registered: false, // 我有没有注册账号
     username: '',      // 我的账号名
     hasAnyAccount: false, // 房间里有没有人注册了账号
+    accStep: 'pick',   // 账号弹窗当前停在哪一步：pick（选登入/注册）→ login / reg（填密码）
+    accAutoOpened: false, // 本次打开是否已经自动弹过账号选择（只弹一次）
+    clearedAt: 0,     // 本机已清除记录的时间戳：比它早的消息不再显示（0 = 没清过）
   };
 
   /* ---------------- 工具 ---------------- */
@@ -200,16 +212,24 @@
    *
    * 服务端只对本机直连的请求返回这个接口 ——
    * 走公网隧道过来的人拿不到，必须用带口令的链接。
+   *
+   * ⚠️ 返回值是三态，别混了：
+   *   - `null`  = **不知道**这个房间要不要口令（403 / 网络错误）
+   *   - `''`    = **知道**，而且这个房间是公开的（服务端没设口令）
+   *   - 非空串  = **知道**，就是这个口令
+   *
+   * 以前这里一律返回 `''`，结果公开房间（服务端 ROOM_KEY=''）也被当成
+   * 「不知道口令」→ 前端卡在口令弹窗里，公开房间谁都进不去。
    */
   async function fetchLocalKey() {
     try {
       const res = await fetch('/api/room-key', { cache: 'no-store' });
-      if (!res.ok) return '';
+      if (!res.ok) return null;
       const data = await res.json();
       const key = normalizeKey((data && data.key) || '');
       return key;
     } catch {
-      return '';
+      return null;
     }
   }
 
@@ -218,6 +238,89 @@
       if (key) localStorage.setItem(KEY_STORE, key);
       else localStorage.removeItem(KEY_STORE);
     } catch { /* ignore */ }
+  }
+
+  /* ---------------- 清除本机聊天记录 ---------------- */
+
+  const CLEAR_STORE = 'chat_cleared_at';
+
+  /**
+   * 读「本机已清除到哪个时间点」。
+   *
+   * 记的是**时间戳**，不是消息 id —— 消息 id 是服务端发的，
+   * 万一以后有人翻服务端数据库补消息，时间戳这种「切一刀」的方式更省事。
+   *
+   * 按房间口令分开存：换了一个房间不该继承上一个房间的清除状态。
+   */
+  function loadClearedAt() {
+    try {
+      const raw = localStorage.getItem(CLEAR_STORE);
+      if (!raw) return 0;
+      const obj = JSON.parse(raw);
+      const room = (state.savedKey || state.key || '');
+      if (obj && obj.room === room) return Number(obj.at) || 0;
+      return 0;
+    } catch { return 0; }
+  }
+
+  function saveClearedAt(at) {
+    try {
+      const room = (state.savedKey || state.key || '');
+      localStorage.setItem(CLEAR_STORE, JSON.stringify({ room, at }));
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * 本机该显示的消息 —— 被「清除」切掉的一律不显示。
+   *
+   * 服务器上的消息**不动**：别人的聊天记录、你换设备登入看到的，
+   * 都还是原来的那些。这里只是"我这台设备不看它们"。
+   */
+  function visibleMessages() {
+    if (!state.clearedAt) return state.messages;
+    return state.messages.filter((m) => (m.ts || 0) > state.clearedAt);
+  }
+
+  /**
+   * 「加载更早的消息」按钮的显隐。
+   *
+   * 本机清除过记录的话就不显示了 —— 那些消息本来就是看不见的，
+   * 让用户点一个按了没反应的按钮更糟。
+   */
+  function syncMoreWrap() {
+    el.moreWrap.hidden = !(state.hasMore && !state.clearedAt);
+  }
+
+  /** 打开「清除聊天记录」的确认框 */
+  function openClearHistory() {
+    el.clearErr.hidden = true;
+    el.clearErr.textContent = '';
+    el.clearModalDesc.textContent = state.clearedAt
+      ? '你已经清除过一次了。再清除一次，这台设备上更早的记录也不会显示。'
+      : '清除这台设备上看到的聊天记录。清除后刷新页面也不会再显示这些旧消息，其他人那边不受影响 —— 消息本身还在服务器上。';
+    el.clearModal.hidden = false;
+    el.clearOk.focus();
+  }
+
+  function closeClearHistory() {
+    el.clearModal.hidden = true;
+  }
+
+  /**
+   * 真的清除 —— 只动本机。
+   *
+   * 做法：记一个"切点"时间戳，之后比它早的消息都不渲染。
+   * 这样刷新页面、从服务端重新拉历史，都不会再冒出来。
+   */
+  function clearMyHistory() {
+    // 切点：比这早的消息，本机都不显示了
+    state.clearedAt = Date.now();
+    saveClearedAt(state.clearedAt);
+    state.messages = [];
+    state.hasMore = false;
+    el.clearModal.hidden = true;
+    renderMessages({ stickBottom: true });
+    syncMoreWrap();
   }
 
   /**
@@ -369,7 +472,15 @@
     // ⚠️ 口令必须写回 state.key ——
     // 头像图片的 URL 也要带口令（/avatar/<token>?k=xxx），
     // 如果 state.key 是空的，头像会全部 403 变成空白圆。
-    if (!state.key) state.key = getRoomKey();
+    //
+    // ⚠️ 这里调的是 readKeys()，不是 getRoomKey() ——
+    // getRoomKey 这个函数根本不存在，一调就 ReferenceError，
+    // 整个 connect() 崩掉。公开房间（没口令）正好会走到这行，
+    // 所以以前「没口令的房间谁都进不去」，真 bug，别再写错了。
+    if (!state.key) {
+      const { urlKey, savedKey } = readKeys();
+      state.key = urlKey || savedKey || '';
+    }
     const key = encodeURIComponent(state.key || '');
     // 会话 token：登入过就带上 → 服务端直接认回身份（名字/头像/历史全回来）
     const tok = encodeURIComponent(getToken() || '');
@@ -518,7 +629,18 @@
         renderUsers();
         renderAccountBtn();
         renderMessages({ stickBottom: true });
-        el.moreWrap.hidden = !state.hasMore;
+        syncMoreWrap();
+
+        // 用户一打开就要登入或注册 —— 没登录的时候自动把账号白框弹出来，
+        // 停在「选登入 / 注册」这一步，等他点。
+        // 已经带着 token 自动认回身份的（回访用户）不打断，让他直接进房间。
+        if (!state.registered && !state.accAutoOpened) {
+          state.accAutoOpened = true;
+          setTimeout(() => {
+            // 口令弹窗开着的时候别抢（那是更前置的问题）
+            if (el.keyModal.hidden && el.accountModal.hidden) openAccount();
+          }, 400);
+        }
         break;
       }
 
@@ -616,7 +738,7 @@
         state.messages = older.concat(state.messages);
         state.hasMore = !!data.hasMore;
         state.loadingMore = false;
-        el.moreWrap.hidden = !state.hasMore;
+        syncMoreWrap();
         renderMessages();
         break;
       }
@@ -678,7 +800,7 @@
           state.messages = data.history.slice();
           state.byId = new Map(state.messages.map((m) => [m.id, m]));
           state.hasMore = !!data.hasMore;
-          el.moreWrap.hidden = !state.hasMore;
+          syncMoreWrap();
         }
         renderMe();
         renderUsers();
@@ -714,14 +836,15 @@
         el.accRegBtn.textContent = '注册';
 
         if (!data.ok) {
-          // 错误显示在对应的框里（登入错 → 上面，登入/注册错 → 下面）
+          // 错误显示在「当前这一步」对应的框里
+          // （之前是靠「登入框里有没有字」来猜，现在步骤是明确的，直接看 state.accStep）
           const msg = data.msg || '操作没成功，再试一次。';
-          if (!el.accLoginErr.hidden || el.accLoginName.value) {
-            el.accLoginErr.hidden = false;
-            el.accLoginErr.textContent = msg;
-          } else {
+          if (state.accStep === 'reg') {
             el.accRegErr.hidden = false;
             el.accRegErr.textContent = msg;
+          } else {
+            el.accLoginErr.hidden = false;
+            el.accLoginErr.textContent = msg;
           }
           return;
         }
@@ -752,7 +875,7 @@
           state.messages = data.history.slice();
           state.byId = new Map(state.messages.map((m) => [m.id, m]));
           state.hasMore = !!data.hasMore;
-          el.moreWrap.hidden = !state.hasMore;
+          syncMoreWrap();
         }
 
         renderMe();
@@ -903,11 +1026,20 @@
 
     const frag = document.createDocumentFragment();
     let prev = null;
-    for (const m of state.messages) {
+    // 被本机「清除」切掉的消息不显示（服务器上的数据没动）
+    const visible = visibleMessages();
+    for (const m of visible) {
       const cont = prev && prev.kind !== 'system' && m.kind !== 'system'
         && prev.from.id === m.from.id && m.ts - prev.ts < GROUP_WINDOW;
       frag.appendChild(messageEl(m, cont));
       prev = m;
+    }
+    // 清空后不是一片空白，给个说明（刷新页面后这条也在）
+    if (!visible.length && state.clearedAt) {
+      frag.appendChild(messageEl({
+        id: 'sys-cleared', from: { id: 'system', name: '系统', color: '#8a929c' },
+        text: '本机聊天记录已清除', kind: 'system', replyTo: null, ts: state.clearedAt + 1,
+      }, false));
     }
     el.messages.replaceChildren(frag);
 
@@ -1168,6 +1300,8 @@
 
   function loadMore() {
     if (!state.hasMore || state.loadingMore) return;
+    // 本机已经清除过记录 —— 更早的消息就算加载出来也是看不见的，别白折腾
+    if (state.clearedAt) { syncMoreWrap(); return; }
     // 取当前最老的一条「真实消息」作为游标（系统提示不参与定位）
     const real = state.messages.filter((m) => m.kind !== 'system');
     const ts = real.length ? real[0].ts : Date.now();
@@ -1316,17 +1450,43 @@
   /* ---------------- 账号：注册 / 登入 ---------------- */
 
   /**
-   * 打开账号白框
+   * 账号弹窗分三步：
+   *   pick  → 只有「登入」「注册」两个选择（进来第一眼看到的就是这个）
+   *   login → 展开登入表单（账号 + 密码）
+   *   reg   → 展开注册表单（账号 + 密码 + 再输一次）
    *
-   * 已经登录过 → 只显示「已登录」状态条和「退出登录」；
-   * 没登录 → 显示上面的「登入」框和下面的「注册」框（两个按钮同时可见）。
+   * 表单是**选完才出现**的 —— 一上来不会同时摆两个密码框。
    */
-  function openAccount() {
+  function showAccStep(step) {
+    state.accStep = step;
+    el.accStepPick.hidden = step !== 'pick';
+    el.accStepLogin.hidden = step !== 'login';
+    el.accStepReg.hidden = step !== 'reg';
+    // 切步骤就把上一句的报错清掉，别把「密码错了」带到注册框里
     el.accLoginErr.hidden = true;
     el.accRegErr.hidden = true;
+    // 焦点直接落到这一步的第一个输入框，手机上可以直接打字
+    const focusEl = step === 'login' ? el.accLoginName
+      : step === 'reg' ? el.accRegName : null;
+    if (focusEl) {
+      setTimeout(() => { try { focusEl.focus(); } catch { /* ignore */ } }, 60);
+    }
+  }
+
+  /**
+   * 打开账号白框
+   *
+   * 已经登录过 → 顶部显示「已登录」状态条；
+   * 没登录 → 先停在「选登入 / 注册」这一步，等用户点了再展开表单。
+   */
+  function openAccount() {
     el.accLoginPw.value = '';
     el.accRegPw.value = '';
     el.accRegPw2.value = '';
+    el.accLoginBtn.disabled = false;
+    el.accLoginBtn.textContent = '登入';
+    el.accRegBtn.disabled = false;
+    el.accRegBtn.textContent = '注册';
 
     if (state.registered) {
       el.accState.hidden = false;
@@ -1336,6 +1496,8 @@
       el.accState.hidden = true;
       el.accountDesc.textContent = '登录后，这个名字、头像和聊天记录在任何设备上都能找回来。';
     }
+    // 每次打开都从「选登入 / 注册」开始 —— 表单是选完才展开的
+    showAccStep('pick');
     el.accountModal.hidden = false;
     // 问一下服务端最新状态（别人可能刚注册过）
     wsSend({ t: 'accountInfo' });
@@ -1351,6 +1513,7 @@
 
   /** 登入 */
   function submitAccountLogin() {
+    state.accStep = 'login';
     const name = String(el.accLoginName.value || '').trim();
     const pw = String(el.accLoginPw.value || '');
     if (!name) {
@@ -1375,6 +1538,7 @@
 
   /** 注册 */
   function submitAccountRegister() {
+    state.accStep = 'reg';
     const name = String(el.accRegName.value || '').trim();
     const pw = String(el.accRegPw.value || '');
     const pw2 = String(el.accRegPw2.value || '');
@@ -1477,6 +1641,16 @@
   el.quoteClose.addEventListener('click', clearReplyTo);
   el.moreBtn.addEventListener('click', loadMore);
 
+  /* ---------------- 清除本机聊天记录 ---------------- */
+
+  el.clearHistBtn.addEventListener('click', openClearHistory);
+  el.clearCancel.addEventListener('click', closeClearHistory);
+  el.clearOk.addEventListener('click', clearMyHistory);
+  el.clearModal.addEventListener('click', (e) => {
+    // 点遮罩空白处 = 取消
+    if (e.target === el.clearModal) closeClearHistory();
+  });
+
   /* ---------------- 换头像 ---------------- */
 
   el.meAvatar.addEventListener('click', openAvatarPicker);
@@ -1537,6 +1711,12 @@
   el.accLoginBtn.addEventListener('click', submitAccountLogin);
   el.accRegBtn.addEventListener('click', submitAccountRegister);
   el.accLogoutBtn.addEventListener('click', submitAccountLogout);
+  // 第 1 步：点了才展开对应表单
+  el.accPickLogin.addEventListener('click', () => showAccStep('login'));
+  el.accPickReg.addEventListener('click', () => showAccStep('reg'));
+  // 不想填了 → 退回选择页
+  el.accBackLogin.addEventListener('click', () => showAccStep('pick'));
+  el.accBackReg.addEventListener('click', () => showAccStep('pick'));
 
   // 回车直接提交（手机上省一次点按）
   el.accLoginPw.addEventListener('keydown', (e) => {
@@ -1673,17 +1853,23 @@
     state.savedKey = savedKey;
     state.key = urlKey || savedKey;
 
+    // 本机「清除记录」的状态 —— 按房间分开存，得等口令知道了再读
+    state.clearedAt = loadClearedAt();
+
     if (!state.key) {
       // 本机直连的话，服务端会给口令
       const local = await fetchLocalKey();
-      if (local) {
+      if (local !== null) {
+        // local 可能是 ''（公开房间，服务端根本没设口令）——
+        // 这也是「已经知道口令了」，照样直接连。
         state.key = local;
         state.savedKey = local;
+        state.keyResolved = true;
       }
     }
 
-    if (!state.key) {
-      // 没有口令就别先连一次被拒了 —— 直接弹窗，省一次往返
+    if (!state.key && !state.keyResolved) {
+      // 既没有链接口令、又问不到 —— 只能让用户手输
       setConn('需要房间口令', false);
       askRoomKey('请输入房间口令后进入。');
       return;
@@ -1696,6 +1882,8 @@
     state, handle, renderMessages, pushSystem, setReplyTo,
     openSettings, closeSettings, showPwView, openLogin, closeLogin,
     openAccount, closeAccount, renderAccountBtn, submitAccountLogin, submitAccountRegister,
+    showAccStep,
+    openClearHistory, closeClearHistory, clearMyHistory, visibleMessages, syncMoreWrap,
     getToken, setToken,
   };
 })();

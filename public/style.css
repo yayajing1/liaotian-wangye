@@ -236,6 +236,46 @@ body {
   padding: 18px 24px 6px;
 }
 
+/* --- 聊天区顶部条：放「清除记录」入口 ---
+   微信的聊天页右上角有「⋯」，点开能清空聊天记录。
+   这里只留一个按钮，但放在同一个位置（聊天区顶部右侧）。 */
+.chat-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 7px 14px 6px;
+  background: #cbe3f5;
+  border-bottom: 1px solid rgba(120, 165, 200, 0.35);
+}
+
+.chat-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  font-size: 12.5px;
+  color: #4a5a68;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(120, 165, 200, 0.45);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-bar-btn:hover {
+  background: #fff;
+  color: #1c1e21;
+}
+
+.chat-bar-btn:active { transform: translateY(0.5px); }
+
+.chat-bar-ico { font-size: 13px; line-height: 1; }
+
+.chat-bar-txt { line-height: 1.2; }
+
 .messages::-webkit-scrollbar { width: 8px; }
 .messages::-webkit-scrollbar-thumb { background: #b7d5e8; border-radius: 4px; }
 .messages::-webkit-scrollbar-thumb:hover { background: #a2c6de; }
@@ -891,6 +931,12 @@ body {
 
 @media (max-width: 760px) {
 
+  /* ---------- 聊天区顶部条（手机上收紧，别占地方） ---------- */
+
+  .chat-bar { padding: 5px 8px 4px; }
+  .chat-bar-btn { padding: 5px 10px; font-size: 12px; gap: 4px; }
+  .chat-bar-ico { font-size: 12px; }
+
   /* ---------- 左边：在线成员（收窄成一条窄栏） ---------- */
 
   .sidebar {
@@ -1023,6 +1069,83 @@ body {
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.24);
 }
 
+/* 第 1 步：选「登入 / 注册」两个大按钮 */
+.acc-picks {
+  display: flex;
+  gap: 10px;
+}
+
+/* .acc-pick 用 button 元素实现，所以要手动抹掉浏览器默认样式 */
+.acc-pick {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 15px 14px 16px;
+  background: #fbfcfe;
+  border: 1px solid #e3e8ee;
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: border-color .15s ease, background .15s ease, transform .1s ease;
+}
+
+.acc-pick:hover {
+  border-color: #9ec8f5;
+  background: #f4f9fe;
+}
+
+.acc-pick:active {
+  transform: translateY(1px);
+}
+
+.acc-pick:focus-visible {
+  outline: 2px solid #378add;
+  outline-offset: 2px;
+}
+
+.acc-pick-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1c1e21;
+}
+
+.acc-pick-note {
+  font-size: 11.5px;
+  color: #8a9199;
+  line-height: 1.45;
+}
+
+.acc-hint {
+  margin: 10px 2px 0;
+  font-size: 11.5px;
+  color: #9aa1a9;
+  line-height: 1.5;
+}
+
+/* 表单区顶部的「返回选择」 */
+.acc-back {
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid #e3e8ee;
+  border-radius: 8px;
+  background: #fff;
+  color: #6b7480;
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.acc-back:hover {
+  border-color: #9ec8f5;
+  color: #185FA5;
+}
+
 .acc-box {
   border: 1px solid #e3e8ee;
   border-radius: 12px;
@@ -1047,19 +1170,6 @@ body {
   font-size: 15px;
   font-weight: 600;
   color: #1c1e21;
-  /* 「登入」「注册」两个字用竖线隔开，视觉上像两个独立分区 */
-  position: relative;
-  padding-right: 11px;
-}
-
-.acc-box-title::after {
-  content: '';
-  position: absolute;
-  right: 0;
-  top: 2px;
-  bottom: 2px;
-  width: 1px;
-  background: #dbe2ea;
 }
 
 .acc-box-note {
@@ -1128,4 +1238,10 @@ body {
   .acc-box-note { font-size: 11px; }
   .acc-actions { margin-top: 12px; }
   .acc-actions .modal-btn { padding: 10px 12px; font-size: 14px; }
+
+  /* 选择页：手机上竖排，两个按钮各占一行，手指好点 */
+  .acc-picks { flex-direction: column; gap: 9px; }
+  .acc-pick { padding: 13px 13px 14px; }
+  .acc-pick-title { font-size: 15.5px; }
+  .acc-hint { margin-top: 9px; }
 }
