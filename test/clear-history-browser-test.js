@@ -195,11 +195,21 @@ const PAGE = `http://localhost:${PORT}/chat#key=${KEY}`;
       var m = document.getElementById('clearModal');
       if (!m || m.hidden) return { open: false };
       var r = m.querySelector('.modal').getBoundingClientRect();
+      // 关键：确认框不能被别的弹窗盖住。
+      // 打开页面时账号框会自动弹出来，如果清除框 z-index 不够高，
+      // 用户点了「清除记录」会**什么都看不见**。
+      var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      var top = document.elementFromPoint(cx, cy);
+      var covered = !(top && m.contains(top));
       return { open: true, inScreen: r.top >= 0 && r.bottom <= window.innerHeight + 1,
-               title: (m.querySelector('.modal-title')||{}).textContent || '' };
+               title: (m.querySelector('.modal-title')||{}).textContent || '',
+               covered: covered,
+               coverBy: covered && top ? (top.id || top.className || top.tagName) : '' };
     })()`);
     check('弹出的是白框确认框', modalOpen.open, modalOpen.title);
     check('确认框在屏幕内', modalOpen.inScreen !== false);
+    check('确认框没被别的弹窗盖住', modalOpen.covered !== true,
+      modalOpen.covered ? `被「${modalOpen.coverBy}」挡住了` : '在最上层');
 
     /* ---------- [4] 取消 = 什么都不该丢 ---------- */
     console.log('\n[4] 点「取消」→ 消息一条不少');
