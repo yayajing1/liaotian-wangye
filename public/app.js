@@ -58,6 +58,14 @@
     clearHistBtn: $('clearHistBtn'), clearModal: $('clearModal'),
     clearModalDesc: $('clearModalDesc'), clearErr: $('clearErr'),
     clearOk: $('clearOk'), clearCancel: $('clearCancel'),
+    // 聊天图片
+    imgBtn: $('imgBtn'), filePicker: $('filePicker'),
+    imgPreview: $('imgPreview'), imgPreviewImg: $('imgPreviewImg'),
+    imgPreviewCap: $('imgPreviewCap'), imgPreviewX: $('imgPreviewX'),
+    lightbox: $('lightbox'), lightboxImg: $('lightboxImg'), lightboxX: $('lightboxX'),
+    // 聊天背景
+    bgBtn: $('bgBtn'), bgModal: $('bgModal'), bgErr: $('bgErr'),
+    bgPickFile: $('bgPickFile'), bgPickClear: $('bgPickClear'), bgCancel: $('bgCancel'),
   };
 
   const RECALL_WINDOW = 2 * 60 * 1000;    // 撤回时限
@@ -65,6 +73,9 @@
   const TYPING_TTL = 3200;                // 输入中提示的存活时间
   const BASE_TITLE = '聊天网页';
   const AVATAR_SIZE = 128;                // 图片头像边长（与服务端一致）
+  const CHAT_IMG_MAX = 1280;              // 聊天图片最长边（与服务端约定一致）
+  const CHAT_IMG_QUALITY = 0.82;          // JPEG 压缩质量
+  const BG_STORE = 'chat_bg_image';        // 聊天背景（localStorage 键）
 
   const EMOJIS = [
     '😀','😄','😁','😊','🙂','😉','😍','🥰',
@@ -115,6 +126,9 @@
     accStep: 'pick',   // 账号弹窗当前停在哪一步：pick（选登入/注册）→ login / reg（填密码）
     accAutoOpened: false, // 本次打开是否已经自动弹过账号选择（只弹一次）
     clearedAt: 0,     // 本机已清除记录的时间戳：比它早的消息不再显示（0 = 没清过）
+    pendingImage: '',   // 待发送的聊天图片（base64，无 data: 前缀）
+    pendingImageUrl: '',// 待发送图片的预览地址（dataURL）
+    bgUrl: '',          // 聊天背景图地址（dataURL，存 localStorage）
   };
 
   /* ---------------- 工具 ---------------- */
@@ -279,6 +293,211 @@
   function visibleMessages() {
     if (!state.clearedAt) return state.messages;
     return state.messages.filter((m) => (m.ts || 0) > state.clearedAt);
+  }
+
+  /* ================================================================
+     聊天图片：发图片
+     ================================================================ */
+
+  /**
+   * 读一张图片文件 → 缩到最长边 1280px → 转 JPEG base64。
+   *
+   * 为什么客户端处理：
+   *   - 手机相册里的照片动辄几 MB，直接发会卡住
+   *   - 统一缩到 1280px，清晰度够看，体积能控制在 300KB 左右
+   *   - 转 JPEG：照片用 PNG 会大一倍不止
+   */
+  function readChatImage(file) {
+    return new Promise((resolve, reject) => {
+      if (!file) return reject(new Error('没有选文件'));
+      if (!/^image\//.test(file.type)) return reject(new Error('这不是图片文件'));
+
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('读取失败，换一张试试'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('这张图打不开，换一张试试'));
+        img.onload = () => {
+          try {
+            // 按最长边等比缩放
+            const scale = Math.min(1, CHAT_IMG_MAX / Math.max(img.width, img.height));
+            const w = Math.max(1, Math.round(img.width * scale));
+            const h = Math.max(1, Math.round(img.height * scale));
+
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.imageSmoothingQuality = 'high';
+            // 先铺白底 —— PNG 转 JPEG 时透明区域会变黑
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0, w, h);
+
+            const dataUrl = canvas.toDataURL('image/jpeg', CHAT_IMG_QUALITY);
+            resolve({
+              b64: dataUrl.split(',')[1] || '',   // 去掉 data:image/jpeg;base64, 前缀
+              preview: dataUrl,
+            });
+          } catch (err) {
+            reject(new Error('处理失败，换一张试试'));
+          }
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /** 打开文件选择框（发图片 / 选背景共用） */
+  function pickFile(cb) {
+    const input = el.filePicker;
+    if (!input) return;
+    // 每次都先清空，否则连续选同一个文件不会触发 change
+    input.value = '';
+    input.onchange = () => {
+      const f = input.files && input.files[0];
+      input.onchange = null;
+      if (f) cb(f);
+    };
+    input.click();
+  }
+
+  /** 选中图片后的预览条 */
+  function showImagePreview(b64, previewUrl) {
+    state.pendingImage = b64;
+    state.pendingImageUrl = previewUrl;
+    el.imgPreviewImg.src = previewUrl;
+    el.imgPreviewCap.value = '';
+    el.imgPreview.hidden = false;
+    // 输入框让位：把焦点给配文输入，用户可以顺手写一句
+    try { el.imgPreviewCap.focus(); } catch { /* ignore */ }
+  }
+
+  /** 取消待发送的图片 */
+  function clearImagePreview() {
+    state.pendingImage = '';
+    state.pendingImageUrl = '';
+    el.imgPreview.hidden = true;
+    el.imgPreviewImg.removeAttribute('src');
+    el.imgPreviewCap.value = '';
+  }
+
+  /** 真正把图片发出去 */
+  function sendPendingImage() {
+    if (!state.pendingImage) return;
+    const b64 = state.pendingImage;
+    const caption = String(el.imgPreviewCap.value || '').trim();
+    const wasOnlyImage = !el.input.value.trim();
+
+    clearImagePreview();
+    if (wasOnlyImage) el.input.value = '';
+
+    wsSend({ t: 'image', data: b64, caption });
+
+    // 服务端确认后广播 msg，这里直接等广播渲染
+    // （失败会收到 imageAck，此时提示用户）
+  }
+
+  /* ================================================================
+     聊天背景：只影响自己这台设备
+     ================================================================ */
+
+  function saveBg(url) {
+    try {
+      if (url) localStorage.setItem(BG_STORE, url);
+      else localStorage.removeItem(BG_STORE);
+    } catch { /* ignore */ }
+  }
+
+  function loadBg() {
+    try {
+      return localStorage.getItem(BG_STORE) || '';
+    } catch { return ''; }
+  }
+
+  /** 把背景贴到聊天区底层 */
+  function applyBg(url) {
+    const chat = document.querySelector('.chat');
+    if (!chat) return;
+    state.bgUrl = url || '';
+    if (state.bgUrl) {
+      chat.style.backgroundImage = `url("${state.bgUrl}")`;
+      chat.classList.add('has-bg');
+    } else {
+      chat.style.backgroundImage = 'none';
+      chat.classList.remove('has-bg');
+    }
+  }
+
+  /** 选一张图当背景 */
+  async function setBgFromFile(file) {
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('读取失败，换一张试试'));
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(file);
+      });
+      // 背景图压到 1400px 宽就够铺满了，再大只是浪费本地空间
+      const scaled = await new Promise((resolve) => {
+        const img = new Image();
+        img.onerror = () => resolve(dataUrl);
+        img.onload = () => {
+          try {
+            const maxW = 1400;
+            const scale = Math.min(1, maxW / Math.max(img.width, img.height));
+            const w = Math.round(img.width * scale);
+            const h = Math.round(img.height * scale);
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            const ctx = c.getContext('2d');
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, w, h);
+            resolve(c.toDataURL('image/jpeg', 0.8));
+          } catch { resolve(dataUrl); }
+        };
+        img.src = dataUrl;
+      });
+
+      saveBg(scaled);
+      applyBg(scaled);
+      closeBgModal();
+    } catch (e) {
+      el.bgErr.hidden = false;
+      el.bgErr.textContent = e.message || '换一张试试';
+    }
+  }
+
+  /** 恢复默认背景 */
+  function clearBg() {
+    saveBg('');
+    applyBg('');
+    closeBgModal();
+  }
+
+  function openBgModal() {
+    el.bgErr.hidden = true;
+    el.bgModal.hidden = false;
+  }
+
+  function closeBgModal() {
+    el.bgModal.hidden = true;
+  }
+
+  /* ================================================================
+     大图灯箱：点图片看大图
+     ================================================================ */
+
+  function openLightbox(src) {
+    if (!src) return;
+    el.lightboxImg.src = src;
+    el.lightbox.hidden = false;
+  }
+
+  function closeLightbox() {
+    el.lightbox.hidden = true;
+    el.lightboxImg.removeAttribute('src');
   }
 
   /**
@@ -718,6 +937,14 @@
         break;
       }
 
+      case 'imageAck': {
+        // 图片发出去的结果回执（只发给发送者本人）
+        if (!data.ok) {
+          pushSystem(data.msg || '图片没发出去，再试一次。');
+        }
+        break;
+      }
+
       case 'recall': {
         const m = state.byId.get(data.id);
         if (m) { m.kind = 'recalled'; m.text = ''; }
@@ -976,6 +1203,31 @@
     if (m.kind === 'recalled') {
       bubble.classList.add('recalled');
       bubble.textContent = '消息已被撤回';
+    } else if (m.kind === 'image') {
+      // 图片消息：text 字段存的是图片 token
+      bubble.classList.add('has-img');
+      const img = document.createElement('img');
+      img.className = 'msg-img';
+      img.alt = '聊天图片';
+      img.loading = 'lazy';
+      // 口令走查询参数（<img> 带不了自定义 header）
+      img.src = `/image/${encodeURIComponent(m.text)}?k=${encodeURIComponent(state.key || '')}`;
+      img.addEventListener('click', () => openLightbox(img.src));
+      img.addEventListener('error', () => {
+        // 图片拉不到（过期/没权限）→ 换成一���提示，别留个破图
+        const span = document.createElement('div');
+        span.className = 'msg-img-missing';
+        span.textContent = '图片已失效';
+        if (img.parentNode) img.parentNode.replaceChild(span, img);
+      });
+      bubble.appendChild(img);
+      // 配文（可选）
+      if (m.caption) {
+        const cap = document.createElement('div');
+        cap.className = 'msg-img-cap';
+        cap.textContent = m.caption;
+        bubble.appendChild(cap);
+      }
     } else {
       if (m.replyTo) {
         const src = state.byId.get(m.replyTo);
@@ -1277,6 +1529,18 @@
   /* ---------------- 发送 ---------------- */
 
   function send() {
+    // 有待发的图片 → 优先发图片（配文走图片消息的 caption）
+    if (state.pendingImage) {
+      if (!wsSend({ t: 'image', data: state.pendingImage, caption: el.imgPreviewCap.value.trim() })) {
+        setConn('未连接，正在重试…', false);
+        return;
+      }
+      clearImagePreview();
+      if (!el.input.value.trim()) { el.input.value = ''; autoGrow(); }
+      el.input.focus();
+      return;
+    }
+
     const text = el.input.value;
     if (!text.trim()) return;
 
@@ -1651,6 +1915,41 @@
     if (e.target === el.clearModal) closeClearHistory();
   });
 
+  /* ---------------- 聊天图片 ---------------- */
+
+  el.imgBtn.addEventListener('click', () => {
+    pickFile(async (file) => {
+      try {
+        const { b64, preview } = await readChatImage(file);
+        showImagePreview(b64, preview);
+      } catch (e) {
+        pushSystem(e.message || '这张图发不了，换一张试试');
+      }
+    });
+  });
+
+  el.imgPreviewX.addEventListener('click', clearImagePreview);
+
+  // 灯箱：点图放大，点背景或 × 关闭
+  el.lightbox.addEventListener('click', (e) => {
+    if (e.target === el.lightbox || e.target === el.lightboxX) closeLightbox();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.lightbox.hidden) closeLightbox();
+  });
+
+  /* ---------------- 聊天背景 ---------------- */
+
+  el.bgBtn.addEventListener('click', openBgModal);
+  el.bgCancel.addEventListener('click', closeBgModal);
+  el.bgModal.addEventListener('click', (e) => {
+    if (e.target === el.bgModal) closeBgModal();
+  });
+  el.bgPickFile.addEventListener('click', () => {
+    pickFile((file) => setBgFromFile(file));
+  });
+  el.bgPickClear.addEventListener('click', clearBg);
+
   /* ---------------- 换头像 ---------------- */
 
   el.meAvatar.addEventListener('click', openAvatarPicker);
@@ -1856,6 +2155,9 @@
     // 本机「清除记录」的状态 —— 按房间分开存，得等口令知道了再读
     state.clearedAt = loadClearedAt();
 
+    // 聊天背景（只影响本机，刷新后还在）
+    applyBg(loadBg());
+
     if (!state.key) {
       // 本机直连的话，服务端会给口令
       const local = await fetchLocalKey();
@@ -1884,6 +2186,9 @@
     openAccount, closeAccount, renderAccountBtn, submitAccountLogin, submitAccountRegister,
     showAccStep,
     openClearHistory, closeClearHistory, clearMyHistory, visibleMessages, syncMoreWrap,
+    // 聊天图片 & 背景
+    readChatImage, showImagePreview, clearImagePreview, sendPendingImage,
+    openLightbox, closeLightbox, applyBg, setBgFromFile, clearBg,
     getToken, setToken,
   };
 })();

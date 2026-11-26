@@ -80,19 +80,24 @@ if [ -z "$DB" ]; then
   DB="$DATA_DIR/chat.db"
 fi
 
-# 打包内容：数据库 + 房间口令 + 图片头像目录
+# 打包内容：数据库 + 房间口令 + 图片头像目录 + 聊天图片目录
 #
 # avatars 也要带上 —— 否则恢复备份后，大家的头像全变成默认的字母头像。
+# images 同理 —— 那是聊天里发过的图片，丢了就只剩一个空消息。
 # 注意：下面那个「包内统一改名」的分支会重新打一次包，
-# 所以 avatars 必须在重打包之前就放进包内（靠 -C "$DATA_DIR" avatars 一起打进去）。
+# 所以 avatars/images 必须在重打包之前就放进包内（靠 -C "$DATA_DIR" avatars 一起打进去）。
 AVATAR_ARGS=""
 if [ -d "$DATA_DIR/avatars" ]; then
   AVATAR_ARGS="avatars"
 fi
+IMAGE_ARGS=""
+if [ -d "$DATA_DIR/images" ]; then
+  IMAGE_ARGS="images"
+fi
 
 tar -czf "$OUT" -C "$(dirname "$DB")" "$(basename "$DB")" \
-  -C "$DATA_DIR" room.key $AVATAR_ARGS 2>/dev/null \
-  || tar -czf "$OUT" -C "$DATA_DIR" chat.db room.key $AVATAR_ARGS
+  -C "$DATA_DIR" room.key $AVATAR_ARGS $IMAGE_ARGS 2>/dev/null \
+  || tar -czf "$OUT" -C "$DATA_DIR" chat.db room.key $AVATAR_ARGS $IMAGE_ARGS
 
 # 包内统一用 chat.db 这个名字 —— 快照文件叫 chat.db.snap，
 # 直接打进去的话迁移解开会得到 chat.db.snap，解压脚本找不到 chat.db。

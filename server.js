@@ -56,6 +56,22 @@ const MAX_AVATAR_BYTES = 256 * 1024;            // 单张上限 256KB（base64 �
 const MAX_AVATAR_B64 = Math.ceil(MAX_AVATAR_BYTES * 4 / 3) + 16;
 const AVATAR_COOLDOWN_MS = Number(process.env.AVATAR_COOLDOWN_MS) || 3000;
 
+// ---- 聊天图片消息 ----
+//
+// 和头像同一套思路：上传 → 存文件 → 引用 token。
+//   1. 客户端压缩到最长边 1280px 的 JPEG，base64 发过来
+//   2. 服务端存到 data/images/<token>.jpg
+//   3. messages.kind = 'image'，text 字段存 token
+//   4. 别人渲染时请求 /image/<token>.jpg?k=<房间口令>
+//
+// 图片比头像大得多，所以上限放宽到 1.5MB（解码后）。
+// 仍然要口令才能看 —— 聊天里的照片是私人的，不能裸奔。
+const IMAGE_DIR = path.join(DATA_DIR, 'images');
+const MAX_IMAGE_BYTES = 1536 * 1024;              // 单张上限 1.5MB
+const MAX_IMAGE_B64 = Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 16;
+const IMAGE_COOLDOWN_MS = Number(process.env.IMAGE_COOLDOWN_MS) || 800;
+const IMAGE_TTL_MS = Number(process.env.IMAGE_TTL_MS) || 7 * 24 * 60 * 60 * 1000;
+
 // 消息保留 7 天，定时清理
 // 保留期和清理间隔都做成环境变量可调 —— 测试里用小值快速验证
 // 「消息过期 → 用户行被清理 → 昵称释放」这条链路。
@@ -69,6 +85,7 @@ const CLEANUP_INTERVAL_MS = Number(process.env.CLEANUP_INTERVAL_MS) || 60 * 60 *
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(AVATAR_DIR, { recursive: true });
+fs.mkdirSync(IMAGE_DIR, { recursive: true });
 const db = new DatabaseSync(path.join(DATA_DIR, 'chat.db'));
 
 /* ================================================================== */
@@ -198,6 +215,17 @@ db.exec(`
 `);
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(created_at);');
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);');
+
+// ---- 图片消息的配文 ----
+//
+// 图片消息的 text 字段被图片 token 占用了（比如 "a1b2c3d4.jpg"），
+// 所以配文（"看这张图"）要单独存一列。
+// 用 ALTER TABLE 加列 —— 老库没有这列时补上，不影响已有数据。
+try {
+  db.exec('ALTER TABLE messages ADD COLUMN caption TEXT');
+} catch {
+  // 列已存在（正常情况）——忽略
+}
 
 // ---- 设备绑定表 ----
 //
@@ -406,21 +434,21 @@ const S = {
   // 在线成员的心跳（防止久不发言的在线用户被清理掉）
   touchUser: db.prepare('UPDATE users SET last_seen = ? WHERE id = ?'),
   insertMsg: db.prepare(
-    'INSERT INTO messages (id, sender_id, text, kind, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    'INSERT INTO messages (id, sender_id, text, kind, reply_to_id, created_at, caption) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ),
   getMsg: db.prepare(`
-    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color, u.avatar
+    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, m.caption, u.name, u.color, u.avatar
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
     WHERE m.id = ?
   `),
   recallMsg: db.prepare("UPDATE messages SET text = '', kind = 'recalled' WHERE id = ?"),
   latest: db.prepare(`
-    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color, u.avatar
+    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, m.caption, u.name, u.color, u.avatar
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
     ORDER BY m.created_at DESC LIMIT ?
   `),
   olderThan: db.prepare(`
-    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, u.name, u.color, u.avatar
+    SELECT m.id, m.sender_id, m.text, m.kind, m.reply_to_id, m.created_at, m.caption, u.name, u.color, u.avatar
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
     WHERE m.created_at < ?
     ORDER BY m.created_at DESC LIMIT ?
@@ -451,6 +479,7 @@ function toMessage(row) {
     },
     text: row.text,
     kind: row.kind,
+    caption: row.caption || '',
     replyTo: row.reply_to_id || null,
     ts: row.created_at,
   };
@@ -475,6 +504,10 @@ function cleanupOldData() {
   // 用户行被删了，他们的图片头像也就没人引用了 —— 一并清掉
   const orphans = cleanupOrphanAvatars();
   if (orphans) console.log(`[cleanup] 清理无主头像文件 ${orphans} 个`);
+
+  // 消息过期后，聊天图片也没人引用了 —— 一并清掉
+  const imgOrphans = cleanupOrphanImages();
+  if (imgOrphans) console.log(`[cleanup] 清理无主聊天图片 ${imgOrphans} 个`);
 }
 
 /**
@@ -1041,6 +1074,85 @@ function saveAvatarImage(b64) {
   return { ok: true, filename };
 }
 
+/**
+ * 存一张聊天图片。
+ *
+ * 和头像的区别：
+ *   - 尺寸上限大得多（1.5MB vs 256KB）
+ *   - 存 JPEG 而不是 PNG —— 照片用 PNG 会大一倍不止
+ *   - 文件名带 token，内容变了就是新 URL，可以长期缓存
+ *
+ * 客户端会先把图压到最长边 1280px 再发过来，服务端只做兜底校验。
+ */
+function saveChatImage(b64) {
+  const raw = String(b64 || '');
+  if (!raw) return { ok: false, msg: '没有收到图片' };
+  if (raw.length > MAX_IMAGE_B64) return { ok: false, msg: '图片太大了，换一张小一点的' };
+
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(raw)) return { ok: false, msg: '图片格式不对' };
+
+  let buf;
+  try {
+    buf = Buffer.from(raw, 'base64');
+  } catch {
+    return { ok: false, msg: '图片格式不对' };
+  }
+  if (!buf.length) return { ok: false, msg: '图片格式不对' };
+  if (buf.length > MAX_IMAGE_BYTES) return { ok: false, msg: '图片太大了，换一张小一点的' };
+
+  // JPEG 魔数：FF D8 FF
+  const JPEG_MAGIC = Buffer.from([0xff, 0xd8, 0xff]);
+  const isJpeg = buf.subarray(0, 3).equals(JPEG_MAGIC);
+  // PNG 魔数：89 50 4E 47 0D 0A 1A 0A
+  const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const isPng = buf.subarray(0, 8).equals(PNG_MAGIC);
+  if (!isJpeg && !isPng) return { ok: false, msg: '只支持 JPG / PNG 图片' };
+
+  const token = crypto.randomBytes(8).toString('hex');
+  const ext = isJpeg ? 'jpg' : 'png';
+  const filename = `${token}.${ext}`;
+  try {
+    fs.writeFileSync(path.join(IMAGE_DIR, filename), buf);
+  } catch {
+    return { ok: false, msg: '保存失败了，稍后再试' };
+  }
+  return { ok: true, filename };
+}
+
+/** 删掉一张聊天图片文件 */
+function removeImageFile(filename) {
+  if (!filename) return;
+  if (!/^[0-9a-f]{16}\.(jpg|png)$/.test(filename)) return;
+  try {
+    fs.unlinkSync(path.join(IMAGE_DIR, filename));
+  } catch { /* 文件本来就不在 */ }
+}
+
+/**
+ * 扫一遍图片目录，把数据库里没人引用的文件删掉。
+ * 消息过期后图片就是孤儿了，顺手清掉避免目录膨胀。
+ */
+function cleanupOrphanImages() {
+  let names;
+  try {
+    names = fs.readdirSync(IMAGE_DIR);
+  } catch {
+    return 0;
+  }
+  const used = new Set(
+    db.prepare("SELECT text FROM messages WHERE kind = 'image'").all()
+      .map((r) => r.text)
+      .filter((t) => t && /^[0-9a-f]{16}\.(jpg|png)$/.test(t))
+  );
+  let n = 0;
+  for (const f of names) {
+    if (!/^[0-9a-f]{16}\.(jpg|png)$/.test(f)) continue;
+    if (used.has(f)) continue;
+    try { fs.unlinkSync(path.join(IMAGE_DIR, f)); n++; } catch { /* ignore */ }
+  }
+  return n;
+}
+
 /** 删掉一张头像文件（换掉旧的、或用户行被清理时） */
 function removeAvatarFile(filename) {
   if (!filename) return;
@@ -1237,6 +1349,44 @@ function serveStatic(req, res) {
       res.writeHead(200, {
         'Content-Type': 'image/png',
         // 文件名带随机 token，内容变了就是新 URL —— 可以放心长期缓存
+        'Cache-Control': 'private, max-age=31536000, immutable',
+        ...sec,
+      });
+      res.end(data);
+    });
+    return;
+  }
+
+  /* ---------- 聊天图片 ---------- */
+  //
+  // /image/<token>.jpg?k=<房间口令>
+  //
+  // 和头像一样要口令 —— 聊天里的照片是私人的。
+  if (pathname.startsWith('/image/')) {
+    const m = /^([0-9a-f]{16})\.(jpg|png)$/.exec(pathname.slice('/image/'.length));
+    if (!m) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...sec });
+      res.end('图片不存在');
+      return;
+    }
+    let given = '';
+    try {
+      given = new URL(req.url, 'http://localhost').searchParams.get('k') || '';
+    } catch { given = ''; }
+    if (!keyMatches(given)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8', ...sec });
+      res.end('需要房间口令');
+      return;
+    }
+    const imgPath = path.join(IMAGE_DIR, m[0]);
+    fs.readFile(imgPath, (err, data) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...sec });
+        res.end('图片不存在');
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': m[1] === 'png' ? 'image/png' : 'image/jpeg',
         'Cache-Control': 'private, max-age=31536000, immutable',
         ...sec,
       });
@@ -1499,10 +1649,38 @@ wss.on('connection', (ws, req) => {
 
         const id = crypto.randomUUID();
         const ts = Date.now();
-        S.insertMsg.run(id, user.id, text, 'text', replyTo, ts);
+        S.insertMsg.run(id, user.id, text, 'text', replyTo, ts, '');
         S.touchUser.run(ts, user.id);   // 只刷新在线时间，不回写昵称
 
         broadcast({ t: 'msg', msg: toMessage(S.getMsg.get(id)) });
+        break;
+      }
+
+      /* ---------- 发图片 ---------- */
+      case 'image': {
+        const now = Date.now();
+        // 连点保护：800ms 内不给连发（防止误触一次发一堆）
+        if (user.imageAt && now - user.imageAt < IMAGE_COOLDOWN_MS) {
+          send(ws, { t: 'imageAck', ok: false, msg: '发太快啦，等一下' });
+          return;
+        }
+        // 最多带一句文字说明（可为空）
+        const caption = String(data.caption ?? '').slice(0, MAX_TEXT);
+
+        const saved = saveChatImage(data.data);
+        if (!saved.ok) {
+          send(ws, { t: 'imageAck', ok: false, msg: saved.msg });
+          return;
+        }
+
+        const id = crypto.randomUUID();
+        user.imageAt = now;
+        // kind = 'image'，text 字段存图片 token
+        S.insertMsg.run(id, user.id, saved.filename, 'image', null, now, caption);
+        S.touchUser.run(now, user.id);
+
+        broadcast({ t: 'msg', msg: toMessage(S.getMsg.get(id)) });
+        send(ws, { t: 'imageAck', ok: true, id, caption });
         break;
       }
 

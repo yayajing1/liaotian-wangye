@@ -450,6 +450,7 @@ mkdir -p "$DATA_DIR"
 
 # 图片头像目录 —— 服务端会往这里存用户上传的头像
 mkdir -p "$DATA_DIR/avatars"
+mkdir -p "$DATA_DIR/images"
 
 # systemd 的 ReadWritePaths 指向的路径必须**已经存在**，
 # 否则服务会直接启动失败（ProtectSystem 系列加固与它有先后依赖）。

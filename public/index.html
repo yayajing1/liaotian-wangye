@@ -40,12 +40,20 @@
     </aside>
 
     <main class="chat">
-      <!-- 聊天区顶部条：目前只放「清除记录」入口（像微信那样只清自己这台设备） -->
+      <!-- 聊天区顶部条：背景设置 + 清除记录 -->
       <div class="chat-bar">
-        <button type="button" class="chat-bar-btn" id="clearHistBtn"
-          title="清除这台设备上看到的聊天记录">
-          <span class="chat-bar-ico">🧹</span><span class="chat-bar-txt">清除记录</span>
-        </button>
+        <div class="chat-bar-left">
+          <button type="button" class="chat-bar-btn" id="bgBtn"
+            title="从相册选一张图当聊天背景">
+            <span class="chat-bar-ico">🖼</span><span class="chat-bar-txt">背景</span>
+          </button>
+        </div>
+        <div class="chat-bar-right">
+          <button type="button" class="chat-bar-btn" id="clearHistBtn"
+            title="清除这台设备上看到的聊天记录">
+            <span class="chat-bar-ico">🧹</span><span class="chat-bar-txt">清除记录</span>
+          </button>
+        </div>
       </div>
 
       <div class="messages" id="messages"></div>
@@ -65,8 +73,20 @@
           <button type="button" class="quote-close" id="quoteClose" aria-label="取消引用">×</button>
         </div>
 
+        <!-- 待发送的图片预览 -->
+        <div class="img-preview" id="imgPreview" hidden>
+          <img id="imgPreviewImg" alt="要发送的图片预览">
+          <div class="img-preview-info">
+            <div class="img-preview-label">图片已就绪</div>
+            <input class="img-preview-cap" id="imgPreviewCap" type="text" maxlength="60"
+              placeholder="配文（可以不填）">
+          </div>
+          <button type="button" class="img-preview-x" id="imgPreviewX" aria-label="取消发送图片">×</button>
+        </div>
+
         <div class="input-row">
           <button type="button" class="icon-btn" id="emojiBtn" title="表情">☺</button>
+          <button type="button" class="icon-btn" id="imgBtn" title="发图片">🖼</button>
           <textarea id="input" rows="1" maxlength="1000"
             placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
           <button type="button" class="send-btn" id="sendBtn">发送</button>
@@ -75,6 +95,15 @@
         <div class="emoji-panel" id="emojiPanel" hidden></div>
       </div>
     </main>
+  </div>
+
+  <!-- 隐藏的文件选择框：发图片 / 选聊天背景都用它 -->
+  <input type="file" id="filePicker" accept="image/*" hidden>
+
+  <!-- 图片灯箱：点开大图 -->
+  <div class="lightbox" id="lightbox" hidden>
+    <img id="lightboxImg" alt="查看大图">
+    <button type="button" class="lightbox-x" id="lightboxX" aria-label="关闭">×</button>
   </div>
 
   <!-- 房间口令弹窗：用页面内实现，不用 window.prompt -->
@@ -238,6 +267,30 @@
       <div class="modal-actions">
         <button type="button" class="modal-btn" id="clearCancel">取消</button>
         <button type="button" class="modal-btn danger" id="clearOk">确定清除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 聊天背景：只影响自己这台设备 -->
+  <div class="modal-mask" id="bgModal" hidden>
+    <div class="modal modal-bg" role="dialog" aria-modal="true" aria-labelledby="bgModalTitle">
+      <h2 class="modal-title" id="bgModalTitle">聊天背景</h2>
+      <p class="modal-desc" id="bgModalDesc">
+        从相册里选一张图当聊天背景。只影响你这台设备，别人看不到。
+      </p>
+      <div class="bg-picks" id="bgPicks">
+        <button type="button" class="bg-pick bg-pick-file" id="bgPickFile">
+          <span class="bg-pick-ico">＋</span>
+          <span class="bg-pick-label">从相册选</span>
+        </button>
+        <button type="button" class="bg-pick bg-pick-clear" id="bgPickClear">
+          <span class="bg-pick-ico">✕</span>
+          <span class="bg-pick-label">恢复默认</span>
+        </button>
+      </div>
+      <p class="modal-err" id="bgErr" hidden></p>
+      <div class="modal-actions">
+        <button type="button" class="modal-btn" id="bgCancel">关闭</button>
       </div>
     </div>
   </div>
