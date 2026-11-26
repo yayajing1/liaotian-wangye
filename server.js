@@ -1385,8 +1385,11 @@ function serveStatic(req, res) {
         res.end('图片不存在');
         return;
       }
-      res.writeHead(200, {
-        'Content-Type': m[1] === 'png' ? 'image/png' : 'image/jpeg',
+    // m[1]=token, m[2]=扩展名（jpg / png）
+    // 注意别写成 m[1] —— 那永远是 token，PNG 会被当成 image/jpeg 发出去，
+    // 碰上 nosniff 头，严格的客户端会直接拒渲染。
+    res.writeHead(200, {
+      'Content-Type': m[2] === 'png' ? 'image/png' : 'image/jpeg',
         'Cache-Control': 'private, max-age=31536000, immutable',
         ...sec,
       });
